@@ -1,0 +1,28 @@
+# Local source checkouts and build outputs
+/.upstream/
+/.build/
+/build/
+/dist/
+/out/
+/.venv/
+/_launcher_dse/
+/bin/
+__pycache__/
+*.py[cod]
+*.log
+
+# Local runtimes, release archives and game data
+*.exe
+*.dll
+*.pdb
+*.zip
+*.7z
+*.tar.*
+user/
+user-dse/
+savedata/
+CUSA*/
+eboot.bin
+dvdroot_ps4/
+sce_module/
+sce_sys/
