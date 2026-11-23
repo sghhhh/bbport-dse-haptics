@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "name": "DSE Haptics",
+  "curves": {
+    "light_swing": [
+      [0, 0.0, 0.0, 70, 150],
+      [9, 0.07, 0.58, 76, 146],
+      [25, 0.14, 0.43, 85, 129],
+      [47, 0.05, 0.17, 74, 103],
+      [65, 0.0, 0.0, 63, 91]
+    ],
+    "heavy_swing": [
+      [0, 0.0, 0.0, 34, 91],
+      [22, 0.39, 0.05, 40, 97],
+      [46, 0.67, 0.23, 56, 98],
+      [74, 0.51, 0.5, 47, 87],
+      [108, 0.24, 0.24, 37, 78],
+      [139, 0.0, 0.0, 32, 74]
+    ],
+    "charged_swing": [
+      [0, 0.0, 0.0, 46, 106],
+      [15, 0.61, 0.13, 55, 108],
+      [39, 0.78, 0.39, 71, 119],
+      [64, 0.38, 0.79, 58, 147],
+      [93, 0.13, 0.47, 43, 123],
+      [133, 0.0, 0.0, 36, 89]
+    ],
+    "charging": [
+      [0, 0.0, 0.0, 34, 102],
+      [66, 0.12, 0.06, 36, 103],
+      [235, 0.21, 0.1, 39, 108],
+      [425, 0.29, 0.17, 45, 120],
+      [615, 0.36, 0.3, 51, 134],
+      [780, 0.25, 0.18, 47, 124],
+      [910, 0.0, 0.0, 40, 113]
+    ],
+    "thrust": [
+      [0, 0.0, 0.0, 70, 131],
+      [8, 0.25, 0.47, 70, 145],
+      [24, 0.48, 0.68, 69, 143],
+      [53, 0.17, 0.25, 60, 113],
+      [79, 0.0, 0.0, 52, 90]
+    ],
+    "whip": [
+      [0, 0.0, 0.0, 43, 104],
+      [17, 0.37, 0.06, 49, 107],
+      [43, 0.22, 0.18, 48, 125],
+      [54, 0.09, 0.78, 44, 151],
+      [76, 0.08, 0.42, 48, 136],
+      [112, 0.0, 0.0, 43, 109]
+    ],
+    "rotary": [
+      [0, 0.0, 0.0, 46, 91],
+      [19, 0.34, 0.23, 51, 108],
+      [58, 0.59, 0.61, 56, 121],
+      [107, 0.48, 0.54, 53, 130],
+      [171, 0.18, 0.18, 41, 103],
+      [198, 0.0, 0.0, 37, 88]
+    ],
+    "recoil": [
+      [0, 0.0, 0.0, 52, 125],
+      [6, 0.59, 0.87, 62, 139],
+      [23, 0.52, 0.44, 48, 108],
+      [56, 0.19, 0.18, 40, 93],
+      [76, 0.0, 0.0, 32, 84]
+    ],
+    "cannon": [
+      [0, 0.0, 0.0, 32, 94],
+      [10, 0.98, 0.8, 40, 107],
+      [37, 0.91, 0.61, 47, 93],
+      [96, 0.44, 0.35, 39, 82],
+      [186, 0.11, 0.07, 34, 73],
+      [235, 0.0, 0.0, 29, 66]
+    ],
+    "flesh": [
+      [0, 0.0, 0.0, 40, 84],
+      [12, 0.77, 0.58, 51, 98],
+      [29, 0.66, 0.39, 46, 85],
+      [56, 0.28, 0.17, 40, 77],
+      [99, 0.0, 0.0, 34, 63]
+    ],
+    "stone": [
+      [0, 0.0, 0.0, 56, 115],
+      [6, 0.91, 0.84, 67, 122],
+      [17, 0.42, 0.27, 57, 108],
+      [29, 0.56, 0.39, 64, 103],
+      [55, 0.19, 0.11, 53, 89],
+      [84, 0.0, 0.0, 45, 79]
+    ],
+    "wood": [
+      [0, 0.0, 0.0, 45, 97],
+      [11, 0.71, 0.43, 55, 105],
+      [24, 0.51, 0.3, 50, 93],
+      [38, 0.2, 0.11, 44, 83],
+      [62, 0.0, 0.0, 36, 73]
+    ],
+    "metal": [
+      [0, 0.0, 0.0, 57, 145],
+      [6, 0.76, 0.95, 62, 152],
+      [23, 0.29, 0.67, 55, 146],
+      [58, 0.14, 0.38, 48, 141],
+      [107, 0.05, 0.15, 42, 134],
+      [140, 0.0, 0.0, 37, 128]
+    ],
+    "door": [
+      [0, 0.0, 0.0, 36, 78],
+      [15, 0.39, 0.25, 46, 99],
+      [70, 0.2, 0.12, 39, 85],
+      [132, 0.35, 0.27, 43, 94],
+      [270, 0.57, 0.31, 48, 88],
+      [385, 0.27, 0.26, 35, 79],
+      [446, 0.1, 0.15, 33, 75],
+      [462, 0.38, 0.49, 57, 131],
+      [529, 0.0, 0.0, 38, 97]
+    ],
+    "ladder": [
+      [0, 0.0, 0.0, 45, 100],
+      [7, 0.09, 0.51, 51, 123],
+      [20, 0.15, 0.36, 45, 103],
+      [37, 0.23, 0.15, 43, 84],
+      [72, 0.0, 0.0, 41, 74]
+    ]
+  },
+  "profiles": {
+    "standard": {"duration": 1.0, "left": 1.0, "right": 1.0, "pitch": 1.0, "flutter": 0.0},
+    "light_blade": {"duration": 0.82, "left": 0.82, "right": 1.14, "pitch": 1.09, "flutter": 0.0},
+    "long_blade": {"duration": 1.12, "left": 1.1, "right": 0.95, "pitch": 0.91, "flutter": 0.0},
+    "thrust": {"duration": 0.88, "left": 0.86, "right": 1.04, "pitch": 1.04, "flutter": 0.0},
+    "fist": {"duration": 0.75, "left": 0.89, "right": 0.7, "pitch": 0.81, "flutter": 0.0},
+    "saw": {"duration": 1.0, "left": 1.05, "right": 0.99, "pitch": 0.97, "flutter": 0.07},
+    "extended_saw": {"duration": 1.23, "left": 1.19, "right": 0.91, "pitch": 0.85, "flutter": 0.11},
+    "axe": {"duration": 1.08, "left": 1.16, "right": 0.85, "pitch": 0.85, "flutter": 0.0},
+    "long_axe": {"duration": 1.3, "left": 1.22, "right": 0.9, "pitch": 0.83, "flutter": 0.0},
+    "hammer": {"duration": 1.25, "left": 1.29, "right": 0.77, "pitch": 0.78, "flutter": 0.0},
+    "whip": {"duration": 1.0, "left": 0.85, "right": 1.19, "pitch": 1.04, "flutter": 0.1},
+    "heavy_whip": {"duration": 1.16, "left": 1.12, "right": 1.03, "pitch": 0.89, "flutter": 0.15},
+    "rotary": {"duration": 1.13, "left": 1.0, "right": 1.12, "pitch": 1.04, "flutter": 0.42},
+    "explosive": {"duration": 1.38, "left": 1.17, "right": 1.03, "pitch": 0.83, "flutter": 0.0},
+    "arcane": {"duration": 1.18, "left": 0.84, "right": 0.98, "pitch": 1.1, "flutter": 0.16},
+    "pistol": {"duration": 0.91, "left": 0.89, "right": 1.03, "pitch": 1.01, "flutter": 0.0},
+    "repeating_pistol": {"duration": 1.05, "left": 1.04, "right": 1.1, "pitch": 1.03, "flutter": 0.17},
+    "blunderbuss": {"duration": 1.31, "left": 1.21, "right": 0.99, "pitch": 0.84, "flutter": 0.07},
+    "rifle": {"duration": 1.1, "left": 1.03, "right": 1.08, "pitch": 1.07, "flutter": 0.0},
+    "cannon": {"duration": 1.0, "left": 1.15, "right": 1.09, "pitch": 0.93, "flutter": 0.0},
+    "gatling": {"duration": 0.85, "left": 0.82, "right": 0.97, "pitch": 0.96, "flutter": 0.32},
+    "sprayer": {"duration": 0.93, "left": 0.69, "right": 0.83, "pitch": 0.94, "flutter": 0.22},
+    "bow": {"duration": 1.0, "left": 0.61, "right": 0.92, "pitch": 1.16, "flutter": 0.0}
+  },
+  "weapons": {
+    "1000000": {"normal": {"duration": 0.7, "left": 0.84, "right": 0.74, "pitch": 0.9, "flutter": 0.0}},
+    "2000000": {"normal": {"duration": 0.82, "left": 0.82, "right": 1.15, "pitch": 1.13, "flutter": 0.0}, "transformed": {"duration": 0.95, "left": 1.04, "right": 0.96, "pitch": 0.95, "flutter": 0.02}},
+    "4000000": {"normal": {"duration": 0.7, "left": 0.78, "right": 1.02, "pitch": 1.17, "flutter": 0.0}, "transformed": {"duration": 0.78, "left": 0.94, "right": 1.1, "pitch": 1.17, "flutter": 0.04}},
+    "5000000": {"normal": {"duration": 1.08, "left": 1.16, "right": 0.86, "pitch": 0.89, "flutter": 0.0}, "transformed": {"duration": 1.36, "left": 1.27, "right": 0.94, "pitch": 0.79, "flutter": 0.0}},
+    "5100000": {"normal": {"duration": 0.97, "left": 1.01, "right": 1.08, "pitch": 1.0, "flutter": 0.01}, "transformed": {"duration": 1.27, "left": 1.16, "right": 0.98, "pitch": 0.83, "flutter": 0.04}},
+    "6000000": {"projectile": {"duration": 1.27, "left": 1.2, "right": 0.97, "pitch": 0.84, "flutter": 0.06}},
+    "6100000": {"projectile": {"duration": 1.1, "left": 1.12, "right": 1.02, "pitch": 0.96, "flutter": 0.03}},
+    "7000000": {"normal": {"duration": 0.93, "left": 1.01, "right": 1.01, "pitch": 0.99, "flutter": 0.06}, "transformed": {"duration": 1.19, "left": 1.15, "right": 0.97, "pitch": 0.88, "flutter": 0.1}},
+    "7100000": {"normal": {"duration": 0.96, "left": 0.99, "right": 1.07, "pitch": 1.04, "flutter": 0.05}, "transformed": {"duration": 1.13, "left": 1.03, "right": 1.07, "pitch": 0.98, "flutter": 0.07}},
+    "8000000": {"normal": {"duration": 0.79, "left": 0.8, "right": 1.12, "pitch": 1.11, "flutter": 0.0}, "transformed": {"duration": 1.32, "left": 1.34, "right": 0.8, "pitch": 0.76, "flutter": 0.0}},
+    "8100000": {"normal": {"duration": 0.84, "left": 0.85, "right": 1.11, "pitch": 1.05, "flutter": 0.0}, "transformed": {"duration": 1.23, "left": 1.18, "right": 0.94, "pitch": 0.86, "flutter": 0.02}},
+    "9000000": {"normal": {"duration": 0.76, "left": 0.82, "right": 1.01, "pitch": 1.12, "flutter": 0.04}, "transformed": {"duration": 0.9, "left": 1.0, "right": 1.11, "pitch": 1.18, "flutter": 0.13}},
+    "10000000": {"normal": {"duration": 0.9, "left": 0.8, "right": 1.08, "pitch": 1.08, "flutter": 0.0}, "transformed": {"duration": 1.21, "left": 1.06, "right": 1.11, "pitch": 0.96, "flutter": 0.0}, "projectile": {"duration": 1.06, "left": 1.06, "right": 1.08, "pitch": 0.99, "flutter": 0.0}},
+    "10100000": {"normal": {"duration": 0.8, "left": 0.77, "right": 1.09, "pitch": 1.15, "flutter": 0.0}, "transformed": {"duration": 0.86, "left": 0.86, "right": 1.08, "pitch": 1.1, "flutter": 0.01}, "projectile": {"duration": 0.86, "left": 0.9, "right": 1.04, "pitch": 1.08, "flutter": 0.0}},
+    "11000000": {"normal": {"duration": 0.82, "left": 1.0, "right": 0.82, "pitch": 0.88, "flutter": 0.0}, "transformed": {"duration": 1.26, "left": 1.28, "right": 0.93, "pitch": 0.79, "flutter": 0.02}},
+    "12000000": {"normal": {"duration": 1.22, "left": 1.25, "right": 0.85, "pitch": 0.79, "flutter": 0.02}, "transformed": {"duration": 1.38, "left": 1.12, "right": 1.08, "pitch": 0.91, "flutter": 0.31}},
+    "13000000": {"normal": {"duration": 1.05, "left": 1.18, "right": 0.91, "pitch": 0.88, "flutter": 0.03}, "transformed": {"duration": 1.18, "left": 1.07, "right": 1.15, "pitch": 1.1, "flutter": 0.25}},
+    "14000000": {"projectile": {"duration": 0.86, "left": 0.92, "right": 1.07, "pitch": 1.03, "flutter": 0.0}},
+    "14100000": {"projectile": {"duration": 0.82, "left": 0.84, "right": 1.08, "pitch": 1.13, "flutter": 0.0}},
+    "14200000": {"projectile": {"duration": 1.11, "left": 1.07, "right": 1.1, "pitch": 0.96, "flutter": 0.16}},
+    "15000000": {"projectile": {"duration": 1.1, "left": 1.32, "right": 1.11, "pitch": 0.82, "flutter": 0.01}},
+    "18000000": {"projectile": {"duration": 0.94, "left": 0.7, "right": 0.89, "pitch": 1.08, "flutter": 0.18}},
+    "18100000": {"projectile": {"duration": 0.99, "left": 0.82, "right": 0.9, "pitch": 0.93, "flutter": 0.33}},
+    "20000000": {"normal": {"duration": 1.0, "left": 0.99, "right": 0.83, "pitch": 0.92, "flutter": 0.09}},
+    "20100000": {"normal": {"duration": 0.95, "left": 0.89, "right": 0.83, "pitch": 0.98, "flutter": 0.05}},
+    "22000000": {"normal": {"duration": 0.77, "left": 0.75, "right": 1.08, "pitch": 1.15, "flutter": 0.0}, "transformed": {"duration": 1.13, "left": 0.81, "right": 1.17, "pitch": 1.08, "flutter": 0.12}},
+    "23000000": {"normal": {"duration": 0.98, "left": 1.03, "right": 0.97, "pitch": 0.96, "flutter": 0.0}, "transformed": {"duration": 0.82, "left": 0.88, "right": 1.1, "pitch": 1.11, "flutter": 0.03}},
+    "24000000": {"normal": {"duration": 1.11, "left": 1.19, "right": 0.86, "pitch": 0.89, "flutter": 0.0}, "transformed": {"duration": 1.32, "left": 1.15, "right": 1.13, "pitch": 0.87, "flutter": 0.16}},
+    "25000000": {"normal": {"duration": 1.15, "left": 1.18, "right": 0.83, "pitch": 0.82, "flutter": 0.0}, "transformed": {"duration": 1.27, "left": 1.04, "right": 1.03, "pitch": 0.89, "flutter": 0.2}},
+    "26000000": {"normal": {"duration": 1.13, "left": 1.12, "right": 0.98, "pitch": 0.91, "flutter": 0.0}, "transformed": {"duration": 1.25, "left": 0.96, "right": 1.12, "pitch": 1.09, "flutter": 0.13}, "projectile": {"duration": 1.2, "left": 0.83, "right": 1.09, "pitch": 1.15, "flutter": 0.09}},
+    "27000000": {"normal": {"duration": 0.84, "left": 0.84, "right": 1.11, "pitch": 1.13, "flutter": 0.0}, "transformed": {"duration": 0.88, "left": 1.01, "right": 1.16, "pitch": 1.15, "flutter": 0.06}},
+    "28000000": {"normal": {"duration": 1.16, "left": 1.22, "right": 0.83, "pitch": 0.84, "flutter": 0.0}, "transformed": {"duration": 1.38, "left": 1.32, "right": 0.99, "pitch": 0.79, "flutter": 0.1}},
+    "29000000": {"normal": {"duration": 0.99, "left": 1.11, "right": 0.88, "pitch": 0.89, "flutter": 0.0}, "transformed": {"duration": 1.31, "left": 1.31, "right": 0.96, "pitch": 0.78, "flutter": 0.08}},
+    "30000000": {"normal": {"duration": 0.9, "left": 0.87, "right": 1.11, "pitch": 1.08, "flutter": 0.0}, "transformed": {"duration": 1.16, "left": 1.04, "right": 1.1, "pitch": 0.98, "flutter": 0.0}},
+    "31000000": {"normal": {"duration": 1.12, "left": 1.21, "right": 0.88, "pitch": 0.85, "flutter": 0.04}, "transformed": {"duration": 1.33, "left": 1.07, "right": 1.14, "pitch": 0.97, "flutter": 0.47}},
+    "32000000": {"normal": {"duration": 0.83, "left": 0.84, "right": 1.08, "pitch": 1.1, "flutter": 0.0}, "transformed": {"duration": 0.93, "left": 0.74, "right": 0.96, "pitch": 1.15, "flutter": 0.0}, "projectile": {"duration": 0.97, "left": 0.61, "right": 0.96, "pitch": 1.18, "flutter": 0.0}},
+    "33000000": {"projectile": {"duration": 0.84, "left": 0.85, "right": 0.96, "pitch": 0.91, "flutter": 0.38}},
+    "34000000": {"normal": {"duration": 0.8, "left": 1.12, "right": 0.74, "pitch": 0.83, "flutter": 0.0}},
+    "35000000": {"projectile": {"duration": 1.16, "left": 1.24, "right": 1.16, "pitch": 0.89, "flutter": 0.06}},
+    "36000000": {"projectile": {"duration": 1.06, "left": 0.93, "right": 1.16, "pitch": 1.12, "flutter": 0.0}},
+    "38000000": {"normal": {"duration": 0.85, "left": 0.87, "right": 0.8, "pitch": 0.9, "flutter": 0.11}, "transformed": {"duration": 1.22, "left": 0.9, "right": 1.01, "pitch": 0.91, "flutter": 0.23}}
+  }
+}

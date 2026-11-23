@@ -13,10 +13,10 @@ index 505bbc9..900fdd1 100644
      # Clang 23 added -Wunused-but-set-global (on with -Wall): the runtime keeps a few
 diff --git a/gpu/seamless/bbcoop/combat_haptics.cpp b/gpu/seamless/bbcoop/combat_haptics.cpp
 new file mode 100644
-index 0000000..8ef0cc4
+index 0000000..cf57633
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/combat_haptics.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,561 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "bbcoop/combat_haptics.h"
 +
@@ -53,6 +53,8 @@ index 0000000..8ef0cc4
 +constexpr u64 ScriptActivateOffset = 0x009E3700;
 +constexpr u64 ScriptDeactivateOffset = 0x009E38B0;
 +constexpr std::array<u8, 8> ScriptPrologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56};
++constexpr u64 ObjectActionOffset = 0x013AEB69;
++constexpr std::array<u8, 7> ObjectAction{0x89, 0x41, 0x20, 0x48, 0x8B, 0x4A, 0x20};
 +constexpr u64 MapImpactOffset = 0x018837C0;
 +constexpr std::array<u8, 8> MapImpact{0x49, 0x63, 0x45, 0x5C, 0x49, 0x63, 0x4D, 0x64};
 +constexpr u64 ObjectImpactOffset = 0x015A5348;
@@ -88,14 +90,17 @@ index 0000000..8ef0cc4
 +    u32 behavior = 0;
 +    MeleeStrength strength = MeleeStrength::Light;
 +    BbCombatWeaponProfile weapon = BB_HAPTIC_STANDARD;
++    u32 item = 0;
++    BbCombatWeaponForm form = BB_HAPTIC_FORM_NORMAL;
 +    Clock::time_point when{};
 +};
 +
 +std::mutex event_lock;
-+TimedEffect attack, damage, charge;
++TimedEffect attack, damage, charge, activity;
 +std::atomic_bool heavy_down;
 +bool charge_active, last_world_object;
 +Clock::time_point last_swing, last_hit, last_shot, last_world;
++Clock::time_point last_door, last_ladder_step;
 +std::array<Melee, 24> recent_melee;
 +size_t next_melee;
 +
@@ -127,19 +132,40 @@ index 0000000..8ef0cc4
 +    return Vitals{std::max(*hp, 0), *max};
 +}
 +
-+u32 EquippedVariation(u64 player) {
++u32 BaseWeaponId(s32 id) {
++    return id >= 1000000 ? static_cast<u32>(id - id % 100000) : 0;
++}
++
++u32 EquippedWeapon(u64 player, bool left = false) {
 +    const u64 equipment = TryRead<u64>(player, 0x4B8).value_or(0);
 +    if (equipment < 0x10000) return 0;
-+    const s32 hand = TryRead<s32>(equipment, 0x10).value_or(-1);
++    const s32 hand = TryRead<s32>(equipment, left ? 0x0C : 0x10).value_or(-1);
 +    if (hand != 0 && hand != 1) return 0;
-+    const size_t slot = static_cast<size_t>(hand * 2 + 1);
-+    const s32 id = TryRead<s32>(equipment, 0x64 + slot * sizeof(s32)).value_or(-1);
-+    // Regular, Lost and Uncanny gear share a variation. Kos has an untransformed fist row.
-+    return id >= 38000000 && id < 38100000 ? 101 : id > 0 ? static_cast<u32>(id / 100000) * 10 : 0;
++    const size_t slot = static_cast<size_t>(hand * 2 + (left ? 0 : 1));
++    return BaseWeaponId(TryRead<s32>(equipment, 0x64 + slot * sizeof(s32)).value_or(-1));
++}
++
++u32 WeaponVariation(u32 item) {
++    return item == 38000000 ? 101 : item / 10000; // Kos's untransformed fist row.
++}
++
++BbCombatWeaponForm MeleeForm(u32 variation, u32 judge) {
++    if ((judge >= 400 && judge < 790) || judge == 390 || judge == 395)
++        return BB_HAPTIC_FORM_TRANSFORMED;
++    if (judge >= 930) {
++        switch (variation) {
++        case 200: case 400: case 500: case 510: case 800: case 810: case 900:
++        case 1000: case 1010: case 1200: case 1300: case 2600: case 2700: case 3100:
++            return BB_HAPTIC_FORM_TRANSFORMED;
++        default:
++            break;
++        }
++    }
++    return BB_HAPTIC_FORM_NORMAL;
 +}
 +
 +BbCombatWeaponProfile MeleeProfile(u32 variation, u32 judge, u8 attack_type) {
-+    const bool transformed = (judge >= 400 && judge < 790) || judge == 390 || judge == 395;
++    const bool transformed = MeleeForm(variation, judge) == BB_HAPTIC_FORM_TRANSFORMED;
 +    switch (variation) {
 +    case 100: case 101: case 3400: return BB_HAPTIC_FIST;
 +    case 200: return transformed || judge == 930 || judge == 940 ?
@@ -301,7 +327,7 @@ index 0000000..8ef0cc4
 +    constexpr std::array<u8, 3> levels{186, 222, 255};
 +    const auto strength = levels[static_cast<size_t>(melee->strength)];
 +    const auto surface = WorldSurface(sound_material, object != 0);
-+    attack = {{BB_HAPTIC_WORLD_IMPACT, melee->weapon, strength, 0, surface}, now};
++    attack = {{BB_HAPTIC_WORLD_IMPACT, melee->weapon, strength, 0, surface, melee->item, melee->form}, now};
 +    if (trace_contacts) {
 +        LOG_NOTICE(Loader, "DSE {} contact material {}, surface {}", object ? "object" : "map",
 +                   material, static_cast<unsigned>(surface));
@@ -348,8 +374,10 @@ index 0000000..8ef0cc4
 +    if (now - last_hit < 80ms || (!melee && now - last_shot < 220ms)) return;
 +    last_hit = now;
 +    const auto action = melee ? HitActions[static_cast<size_t>(melee->strength)] : BB_HAPTIC_LIGHT_HIT;
-+    const auto weapon = melee ? melee->weapon : MeleeProfile(EquippedVariation(hit.player), 0, 255);
-+    attack = {{action, weapon, 255, 0, CharacterSurface(hit.record)}, now};
++    const u32 item = melee ? melee->item : EquippedWeapon(hit.player);
++    const auto weapon = melee ? melee->weapon : MeleeProfile(WeaponVariation(item), 0, 255);
++    const auto form = melee ? melee->form : BB_HAPTIC_FORM_NORMAL;
++    attack = {{action, weapon, 255, 0, CharacterSurface(hit.record), item, form}, now};
 +}
 +
 +void PS4_SYSV_ABI OnProjectile(u64, const GuestRegisterSnapshot* registers) {
@@ -369,7 +397,11 @@ index 0000000..8ef0cc4
 +    const auto interval = *weapon == BB_HAPTIC_GATLING ? 48ms : *weapon == BB_HAPTIC_SPRAYER ? 125ms : 85ms;
 +    if (now - last_shot < interval) return;
 +    last_shot = now;
-+    attack = {{BB_HAPTIC_SHOT, *weapon, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, now};
++    const u32 variation = (static_cast<u32>(id) - 100000000) / 1000;
++    const bool integrated = variation == 1000 || variation == 1010 || variation == 2600 || variation == 3200;
++    const u32 item = EquippedWeapon(player, !integrated);
++    attack = {{BB_HAPTIC_SHOT, *weapon, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN, item,
++               BB_HAPTIC_FORM_PROJECTILE}, now};
 +}
 +
 +void PS4_SYSV_ABI OnSwingStarted(u64, const GuestRegisterSnapshot* registers) {
@@ -382,17 +414,22 @@ index 0000000..8ef0cc4
 +    const u64 attack_data = registers->rbp - 0x110;
 +    const u64 lookup = registers->rbp - 0x50;
 +    const auto selected_row = TryRead<s32>(attack_data, 8);
-+    const bool same_row = TryRead<u64>(attack_data, 0) == player && selected_row &&
++    const bool owned = TryRead<u64>(attack_data, 0) == player;
++    const bool same_row = owned && selected_row &&
 +        TryRead<s32>(attack_data, 0x0C) == 1 && TryRead<s32>(lookup, 4) == 1 &&
 +        TryRead<s32>(lookup, 0) == selected_row;
 +    const u64 row = same_row ? TryRead<u64>(lookup, 8).value_or(0) : 0;
-+    const auto weapon = MeleeProfile((behavior - 100000000) / 1000, behavior % 1000,
-+                                     TryRead<u8>(row, 0x77).value_or(255));
++    const u32 variation = (behavior - 100000000) / 1000;
++    const u32 judge = behavior % 1000;
++    const auto form = MeleeForm(variation, judge);
++    const auto weapon = MeleeProfile(variation, judge, TryRead<u8>(row, 0x77).value_or(255));
++    u32 item = owned ? BaseWeaponId(TryRead<s32>(attack_data, 0x84).value_or(-1)) : 0;
++    if (!item) item = EquippedWeapon(player, judge >= 800 && judge <= 829);
 +
 +    std::scoped_lock lock(event_lock);
 +    const auto now = Clock::now();
 +    const auto strength = ClassifyMelee(behavior, row);
-+    recent_melee[next_melee] = {behavior, strength, weapon, now};
++    recent_melee[next_melee] = {behavior, strength, weapon, item, form, now};
 +    next_melee = (next_melee + 1) % recent_melee.size();
 +    if (now - last_swing < 75ms) return;  // A swing can create volumes for both hands.
 +    last_swing = now;
@@ -402,28 +439,64 @@ index 0000000..8ef0cc4
 +        now - attack.when < 110ms) return;
 +
 +    const auto action = SwingActions[static_cast<size_t>(strength)];
-+    attack = {{action, weapon, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, now};
++    attack = {{action, weapon, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN, item, form}, now};
 +}
 +
-+void PS4_SYSV_ABI OnChargeLoop(u64 entering, const GuestRegisterSnapshot* registers) {
-+    if (!enabled || !heavy_down.load(std::memory_order_relaxed)) return;
-+    constexpr std::string_view prefix = "AtkPowerLoop";
++void PS4_SYSV_ABI OnObjectAction(u64, const GuestRegisterSnapshot* registers) {
++    if (!enabled) return;
++    // ObjAct has accepted the actor and is committing the player's push-open animation.
++    const auto animation = static_cast<u32>(registers->rax);
++    if (animation < 101110 || animation > 101112 || !registers->r12 || registers->r12 != Player()) return;
++    std::scoped_lock lock(event_lock);
++    const auto now = Clock::now();
++    if (now - last_door < 1200ms) return;
++    last_door = now;
++    activity = {{BB_HAPTIC_DOOR, BB_HAPTIC_STANDARD, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, now};
++    if (trace_contacts) LOG_NOTICE(Loader, "DSE local heavy door animation {}", animation);
++}
++
++void PS4_SYSV_ABI OnPlayerAnimation(u64 entering, const GuestRegisterSnapshot* registers) {
++    const bool charging = heavy_down.load(std::memory_order_relaxed);
++    if (!enabled || (!entering && !charging)) return;
++    constexpr std::string_view charge_prefix = "AtkPowerLoop";
 +    // Havok's script generator stores tagged hkStringPtr callback expressions.
 +    const u64 script = TryRead<u64>(registers->rdi, entering ? 0x90 : 0xB0).value_or(0) & ~u64{1};
-+    const auto name = TryRead<std::array<char, prefix.size()>>(script, 0);
-+    if (!name || std::string_view{name->data(), name->size()} != prefix) return;
++    const auto name = TryRead<std::array<char, charge_prefix.size()>>(script, 0);
++    if (!name) return;
++    const std::string_view prefix{name->data(), name->size()};
++    const bool charge_loop = charging && prefix == charge_prefix;
++    const bool ladder = entering && prefix.starts_with("Ladder_");
++    if (!charge_loop && !ladder) return;
 +
 +    const u64 player = Player();
 +    const u64 character = TryRead<u64>(registers->rsi, 0).value_or(0);
 +    if (!player || !character || HavokCharacter(player) != character) return;
 +
 +    std::scoped_lock lock(event_lock);
++    const auto now = Clock::now();
++    if (ladder) {
++        const auto text = TryRead<std::array<char, 40>>(script, 0);
++        if (!text || now - last_ladder_step < 85ms) return;
++        const auto end = std::find(text->begin(), text->end(), '\0');
++        const std::string_view state{text->data(), static_cast<size_t>(end - text->begin())};
++        const bool left = state == "Ladder_Up_Left_onActivate()" || state == "Ladder_Down_Left_onActivate()";
++        const bool right = state == "Ladder_Up_Right_onActivate()" || state == "Ladder_Down_Right_onActivate()";
++        if (!left && !right) return;
++        last_ladder_step = now;
++        const auto strength = static_cast<uint8_t>(state.starts_with("Ladder_Up_") ? 230 : 204);
++        activity = {{BB_HAPTIC_LADDER_STEP, BB_HAPTIC_STANDARD, strength, 0, BB_HAPTIC_SURFACE_UNKNOWN,
++                     0, BB_HAPTIC_FORM_NORMAL, static_cast<uint8_t>(left)}, now};
++        if (trace_contacts) LOG_NOTICE(Loader, "DSE local ladder step {}", left ? "left" : "right");
++        return;
++    }
 +    if (!heavy_down || charge_active == (entering != 0)) return;
 +    charge_active = entering != 0;
 +    const auto action = charge_active ? BB_HAPTIC_CHARGING : BB_HAPTIC_CHARGE_ENDED;
-+    const u32 judge = TryRead<char>(script, prefix.size()) == 'B' ? 400 : 0;
-+    charge = {{action, MeleeProfile(EquippedVariation(player), judge, 255), 255, 0,
-+               BB_HAPTIC_SURFACE_UNKNOWN}, Clock::now()};
++    const u32 judge = TryRead<char>(script, charge_prefix.size()) == 'B' ? 400 : 0;
++    const u32 item = EquippedWeapon(player);
++    const u32 variation = WeaponVariation(item);
++    charge = {{action, MeleeProfile(variation, judge, 255), 255, 0,
++               BB_HAPTIC_SURFACE_UNKNOWN, item, MeleeForm(variation, judge)}, now};
 +}
 +
 +template <size_t Size>
@@ -458,22 +531,25 @@ index 0000000..8ef0cc4
 +    const bool swings = Matches(SwingStartedOffset, SwingStarted) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + SwingStartedOffset),
 +                                   SwingStarted, 0, OnSwingStarted);
-+    const bool charging = Matches(ScriptActivateOffset, ScriptPrologue) &&
-+        Matches(ScriptDeactivateOffset, ScriptPrologue) &&
++    const bool charge_exit = Matches(ScriptDeactivateOffset, ScriptPrologue) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ScriptDeactivateOffset),
-+                                   ScriptPrologue, 0, OnChargeLoop) &&
++                                   ScriptPrologue, 0, OnPlayerAnimation);
++    const bool animation = Matches(ScriptActivateOffset, ScriptPrologue) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ScriptActivateOffset),
-+                                   ScriptPrologue, 1, OnChargeLoop);
++                                   ScriptPrologue, 1, OnPlayerAnimation);
 +    const bool map_impacts = Matches(MapImpactOffset, MapImpact) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + MapImpactOffset), MapImpact, 0, OnWorldImpact);
 +    const bool object_impacts = Matches(ObjectImpactOffset, ObjectImpact) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ObjectImpactOffset), ObjectImpact, 1, OnWorldImpact);
++    const bool doors = Matches(ObjectActionOffset, ObjectAction) &&
++        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ObjectActionOffset), ObjectAction, 0, OnObjectAction);
 +    enabled = true;
 +    LOG_NOTICE(Loader, "DSE combat haptics: confirmed hits and damage enabled, projectiles {}, swings {}, charging {}, "
-+                       "map impacts {}, object impacts {}",
++                       "map impacts {}, object impacts {}, doors {}, ladder steps {}",
 +               projectiles ? "enabled" : "unavailable", swings ? "enabled" : "unavailable",
-+               charging ? "enabled" : "unavailable", map_impacts ? "enabled" : "unavailable",
-+               object_impacts ? "enabled" : "unavailable");
++               animation && charge_exit ? "enabled" : "unavailable", map_impacts ? "enabled" : "unavailable",
++               object_impacts ? "enabled" : "unavailable", doors ? "enabled" : "unavailable",
++               animation ? "enabled" : "unavailable");
 +}
 +
 +extern "C" int bb_dse_combat_input(int heavy) {
@@ -492,7 +568,7 @@ index 0000000..8ef0cc4
 +    if (!enabled) return 0;
 +    std::scoped_lock lock(event_lock);
 +    const auto now = Clock::now();
-+    for (TimedEffect* pending : {&damage, &attack, &charge}) {
++    for (TimedEffect* pending : {&damage, &attack, &charge, &activity}) {
 +        if (pending->event.action != BB_HAPTIC_NONE && now - pending->when <= 200ms) {
 +            *event = pending->event;
 +            *pending = {};
@@ -504,10 +580,10 @@ index 0000000..8ef0cc4
 +}
 diff --git a/gpu/seamless/bbcoop/combat_haptics.h b/gpu/seamless/bbcoop/combat_haptics.h
 new file mode 100644
-index 0000000..4287105
+index 0000000..b380ec6
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/combat_haptics.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,89 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -531,6 +607,8 @@ index 0000000..4287105
 +    BB_HAPTIC_CHARGING,
 +    BB_HAPTIC_CHARGE_ENDED,
 +    BB_HAPTIC_WORLD_IMPACT,
++    BB_HAPTIC_DOOR,
++    BB_HAPTIC_LADDER_STEP,
 +    BB_HAPTIC_ACTION_COUNT,
 +} BbCombatHapticAction;
 +
@@ -570,12 +648,22 @@ index 0000000..4287105
 +    BB_HAPTIC_SURFACE_COUNT,
 +} BbCombatSurface;
 +
++typedef enum BbCombatWeaponForm {
++    BB_HAPTIC_FORM_NORMAL,
++    BB_HAPTIC_FORM_TRANSFORMED,
++    BB_HAPTIC_FORM_PROJECTILE,
++    BB_HAPTIC_FORM_COUNT,
++} BbCombatWeaponForm;
++
 +typedef struct BbCombatHapticEvent {
 +    BbCombatHapticAction action;
 +    BbCombatWeaponProfile weapon;
 +    uint8_t strength;
 +    uint8_t boss;
 +    BbCombatSurface surface;
++    uint32_t weapon_id;
++    BbCombatWeaponForm form;
++    uint8_t mirror;
 +} BbCombatHapticEvent;
 +
 +void bb_dse_combat_install(uint64_t image, uint64_t size, const char *title, const char *version);
@@ -607,12 +695,281 @@ index d1471bf..20ca8ac 100644
  #else
      Core::Bloodborne::InstallCrashCatcher(reinterpret_cast<u64>(image), eboot_size);
  #endif
+diff --git a/gpu/seamless/bbcoop/haptic_profiles.cpp b/gpu/seamless/bbcoop/haptic_profiles.cpp
+new file mode 100644
+index 0000000..af52720
+--- /dev/null
++++ b/gpu/seamless/bbcoop/haptic_profiles.cpp
+@@ -0,0 +1,188 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "bbcoop/haptic_profiles.h"
++
++#include <array>
++#include <charconv>
++#include <cmath>
++#include <cstdio>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <optional>
++#include <stdexcept>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include <nlohmann/json.hpp>
++
++namespace {
++using Json = nlohmann::json;
++
++constexpr std::array<std::string_view, BB_DSE_CURVE_COUNT> CurveNames{
++    "", "light_swing", "heavy_swing", "charged_swing", "charging", "thrust", "whip",
++    "rotary", "recoil", "cannon", "flesh", "stone", "wood", "metal", "door", "ladder",
++};
++constexpr std::array<std::string_view, BB_HAPTIC_WEAPON_PROFILE_COUNT> ProfileNames{
++    "standard", "light_blade", "long_blade", "thrust", "fist", "saw", "extended_saw",
++    "axe", "long_axe", "hammer", "whip", "heavy_whip", "rotary", "explosive", "arcane",
++    "pistol", "repeating_pistol", "blunderbuss", "rifle", "cannon", "gatling", "sprayer", "bow",
++};
++constexpr std::array<std::string_view, BB_HAPTIC_FORM_COUNT> FormNames{
++    "normal", "transformed", "projectile",
++};
++
++struct TuningField {
++    std::string_view name;
++    float BbDseWeaponTuning::*member;
++    float minimum, maximum;
++};
++constexpr std::array Fields{
++    TuningField{"duration", &BbDseWeaponTuning::duration, 0.5f, 2.0f},
++    TuningField{"left", &BbDseWeaponTuning::left, 0.0f, 1.6f},
++    TuningField{"right", &BbDseWeaponTuning::right, 0.0f, 1.6f},
++    TuningField{"pitch", &BbDseWeaponTuning::pitch, 0.6f, 1.5f},
++    TuningField{"flutter", &BbDseWeaponTuning::flutter, 0.0f, 0.70f},
++};
++using Tuning = std::array<std::optional<float>, Fields.size()>;
++using WeaponForms = std::array<Tuning, BB_HAPTIC_FORM_COUNT>;
++
++struct ProfilePack {
++    std::string name = "custom";
++    std::array<std::vector<BbDseMotionPoint>, BB_DSE_CURVE_COUNT> curves;
++    std::array<Tuning, BB_HAPTIC_WEAPON_PROFILE_COUNT> profiles;
++    std::map<uint32_t, WeaponForms> weapons;
++};
++
++// The game view is fixed before the input and WASAPI threads start.
++ProfilePack pack;
++
++float Number(const Json& value, float minimum, float maximum, std::string_view field) {
++    if (value.is_number()) {
++        const float number = value.get<float>();
++        if (std::isfinite(number) && number >= minimum && number <= maximum) return number;
++    }
++    throw std::runtime_error(std::string{field} + " is outside its supported range");
++}
++
++void RequireObject(const Json& value, std::string_view name) {
++    if (!value.is_object()) throw std::runtime_error(std::string{name} + " must be an object");
++}
++
++template <size_t Size>
++size_t Lookup(std::string_view key, const std::array<std::string_view, Size>& names) {
++    for (size_t index = 0; index < Size; ++index) {
++        if (!key.empty() && names[index] == key) return index;
++    }
++    throw std::runtime_error("unknown setting " + std::string{key});
++}
++
++Tuning ParseTuning(const Json& value, const std::string& path) {
++    RequireObject(value, path);
++    Tuning tuning;
++    for (const auto& [name, number] : value.items()) {
++        size_t index = 0;
++        while (index < Fields.size() && Fields[index].name != name) ++index;
++        if (index == Fields.size()) throw std::runtime_error("unknown setting " + path + "." + name);
++        const auto& field = Fields[index];
++        tuning[index] = Number(number, field.minimum, field.maximum, path + "." + name);
++    }
++    return tuning;
++}
++
++std::vector<BbDseMotionPoint> ParseCurve(const Json& value, const std::string& path) {
++    if (!value.is_array() || value.size() < 2 || value.size() > 64)
++        throw std::runtime_error(path + " requires 2 to 64 points");
++    std::vector<BbDseMotionPoint> points;
++    points.reserve(value.size());
++    for (const auto& row : value) {
++        if (!row.is_array() || row.size() != 5 || !row[0].is_number_integer())
++            throw std::runtime_error(path + " requires [ms, left, right, left_hz, right_hz]");
++        const auto ms = static_cast<uint16_t>(Number(row[0], 0, 2500, path + " time"));
++        if (points.empty() ? ms != 0 : ms <= points.back().ms)
++            throw std::runtime_error(path + " must start at 0 and have increasing times");
++        points.push_back({ms, {Number(row[1], 0, 1, path + " left"), Number(row[2], 0, 1, path + " right")},
++                          {Number(row[3], 20, 250, path + " left_hz"), Number(row[4], 20, 250, path + " right_hz")}});
++    }
++    return points;
++}
++
++ProfilePack Parse(const Json& json) {
++    RequireObject(json, "profile pack");
++    if (!json.contains("version") || !json["version"].is_number_integer() || json["version"] != 1)
++        throw std::runtime_error("expected profile pack version 1");
++    ProfilePack result;
++    if (const auto it = json.find("name"); it != json.end()) {
++        result.name = it->get<std::string>();
++        if (result.name.size() > 96 || result.name.find_first_of("\r\n\t") != std::string::npos)
++            throw std::runtime_error("invalid profile pack name");
++    }
++    if (const auto it = json.find("curves"); it != json.end()) {
++        RequireObject(*it, "curves");
++        for (const auto& [name, value] : it->items())
++            result.curves[Lookup(name, CurveNames)] = ParseCurve(value, "curves." + name);
++    }
++    if (const auto it = json.find("profiles"); it != json.end()) {
++        RequireObject(*it, "profiles");
++        for (const auto& [name, value] : it->items())
++            result.profiles[Lookup(name, ProfileNames)] = ParseTuning(value, "profiles." + name);
++    }
++    if (const auto it = json.find("weapons"); it != json.end()) {
++        RequireObject(*it, "weapons");
++        for (const auto& [name, forms] : it->items()) {
++            uint32_t weapon{};
++            const auto end = name.data() + name.size();
++            const auto id = std::from_chars(name.data(), end, weapon);
++            if (id.ec != std::errc{} || id.ptr != end || weapon == 0 || weapon % 100000 != 0 ||
++                std::to_string(weapon) != name)
++                throw std::runtime_error("invalid base weapon ID " + name);
++            RequireObject(forms, "weapons." + name);
++            auto& settings = result.weapons[weapon];
++            for (const auto& [form, value] : forms.items())
++                settings[Lookup(form, FormNames)] = ParseTuning(value, "weapons." + name + "." + form);
++        }
++    }
++    return result;
++}
++
++void Apply(const Tuning& settings, BbDseWeaponTuning& tuning) {
++    for (size_t index = 0; index < Fields.size(); ++index) {
++        if (settings[index]) tuning.*Fields[index].member = *settings[index];
++    }
++}
++} // namespace
++
++extern "C" void bb_dse_profiles_load(const char* app0) {
++    pack = {};
++    if (!app0 || !*app0) return;
++    try {
++        const std::string_view directory{app0};
++        const auto root = std::filesystem::path{std::u8string{directory.begin(), directory.end()}};
++        const auto file = root / "dvdroot_ps4" / "other" / "bbport-dse-haptics.json";
++        if (!std::filesystem::exists(file)) {
++            std::puts("Runtime: DSE using built-in haptic profiles");
++            return;
++        }
++        if (!std::filesystem::is_regular_file(file) || std::filesystem::file_size(file) > 256 * 1024)
++            throw std::runtime_error("expected a regular profile file of at most 256 KiB");
++        std::ifstream input(file, std::ios::binary);
++        if (!input) throw std::runtime_error("could not open profile pack");
++        // An overlay supplies one complete file. Publish only after validating every override.
++        pack = Parse(Json::parse(input));
++        std::printf("Runtime: DSE haptic profiles loaded (%s, %zu weapons)\n", pack.name.c_str(), pack.weapons.size());
++    } catch (const std::exception& error) {
++        std::fprintf(stderr, "Runtime: DSE haptic profile rejected (%s); using built-in profiles\n", error.what());
++    }
++}
++
++extern "C" const BbDseMotionPoint* bb_dse_profile_curve(BbDseCurve curve, unsigned* count) {
++    const auto& points = pack.curves[curve];
++    *count = static_cast<unsigned>(points.size());
++    return points.empty() ? nullptr : points.data();
++}
++
++extern "C" void bb_dse_profile_tuning(const BbCombatHapticEvent* event, BbDseWeaponTuning* tuning) {
++    Apply(pack.profiles[event->weapon], *tuning);
++    if (const auto it = pack.weapons.find(event->weapon_id); it != pack.weapons.end())
++        Apply(it->second[event->form], *tuning);
++}
+diff --git a/gpu/seamless/bbcoop/haptic_profiles.h b/gpu/seamless/bbcoop/haptic_profiles.h
+new file mode 100644
+index 0000000..2c523c0
+--- /dev/null
++++ b/gpu/seamless/bbcoop/haptic_profiles.h
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include "combat_haptics.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum BbDseCurve {
++    BB_DSE_CURVE_NONE,
++    BB_DSE_CURVE_LIGHT_SWING,
++    BB_DSE_CURVE_HEAVY_SWING,
++    BB_DSE_CURVE_CHARGED_SWING,
++    BB_DSE_CURVE_CHARGING,
++    BB_DSE_CURVE_THRUST,
++    BB_DSE_CURVE_WHIP,
++    BB_DSE_CURVE_ROTARY,
++    BB_DSE_CURVE_RECOIL,
++    BB_DSE_CURVE_CANNON,
++    BB_DSE_CURVE_FLESH,
++    BB_DSE_CURVE_STONE,
++    BB_DSE_CURVE_WOOD,
++    BB_DSE_CURVE_METAL,
++    BB_DSE_CURVE_DOOR,
++    BB_DSE_CURVE_LADDER,
++    BB_DSE_CURVE_COUNT,
++} BbDseCurve;
++
++typedef struct BbDseMotionPoint {
++    uint16_t ms;
++    float level[2], hz[2];
++} BbDseMotionPoint;
++
++typedef struct BbDseWeaponTuning {
++    float duration, left, right, pitch, flutter;
++} BbDseWeaponTuning;
++
++void bb_dse_profiles_load(const char *app0);
++const BbDseMotionPoint *bb_dse_profile_curve(BbDseCurve curve, unsigned *count);
++void bb_dse_profile_tuning(const BbCombatHapticEvent *event, BbDseWeaponTuning *tuning);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/probe.c b/src/probe.c
+index 580892c..c47d6f8 100644
+--- a/src/probe.c
++++ b/src/probe.c
+@@ -10,6 +10,9 @@
+ #include "gpu/bbgpu.h"
+ #include "gpu/seamless/bbcoop.h"
+ #include "gpu/seamless/ui/coop_ui.h"
++#ifdef _WIN32
++#include "gpu/seamless/bbcoop/haptic_profiles.h"
++#endif
+ #if !defined(__x86_64__) || !defined(__GNUC__)
+ #error This prototype requires x86-64 GCC or Clang (including MinGW).
+ #endif
+@@ -556,6 +559,9 @@ int main(int argc, char **argv) {
+     }
+     if (app0) {
+         runtime_file_configure(app0, user_dir ? user_dir : "user");
++#ifdef _WIN32
++        bb_dse_profiles_load(app0);
++#endif
+         char sfo[4096], id[16]="";
+         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
+         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
 diff --git a/src/runtime_dse_haptics.c b/src/runtime_dse_haptics.c
 new file mode 100644
-index 0000000..1e3c3f1
+index 0000000..62d8fbc
 --- /dev/null
 +++ b/src/runtime_dse_haptics.c
-@@ -0,0 +1,705 @@
+@@ -0,0 +1,751 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#ifdef _WIN32
 +
@@ -633,6 +990,7 @@ index 0000000..1e3c3f1
 +#include <stdio.h>
 +
 +#include "runtime_dse_haptics.h"
++#include "gpu/seamless/bbcoop/haptic_profiles.h"
 +
 +enum {
 +    SAMPLE_RATE = 48000,
@@ -685,19 +1043,14 @@ index 0000000..1e3c3f1
 +};
 +
 +typedef struct {
-+    Uint16 ms;
-+    float level[2], hz[2];
-+} DseMotionPoint;
-+
-+typedef struct {
-+    const DseMotionPoint *points;
++    const BbDseMotionPoint *points;
 +    unsigned count;
 +} DseMotion;
 +
 +#define MOTION(table) {table, SDL_arraysize(table)}
 +
 +/* The pairs describe the left and right grips. Interpolate between points in PCM. */
-+static const DseMotionPoint light_swing[] = {
++static const BbDseMotionPoint light_swing[] = {
 +    { 0, {0.00f, 0.00f}, {70, 150}},
 +    { 9, {0.07f, 0.58f}, {76, 146}},
 +    {25, {0.14f, 0.43f}, {85, 129}},
@@ -705,7 +1058,7 @@ index 0000000..1e3c3f1
 +    {65, {0.00f, 0.00f}, {63,  91}},
 +};
 +
-+static const DseMotionPoint heavy_swing[] = {
++static const BbDseMotionPoint heavy_swing[] = {
 +    {  0, {0.00f, 0.00f}, {34, 91}},
 +    { 22, {0.39f, 0.05f}, {40, 97}},
 +    { 46, {0.67f, 0.23f}, {56, 98}},
@@ -714,7 +1067,7 @@ index 0000000..1e3c3f1
 +    {139, {0.00f, 0.00f}, {32, 74}},
 +};
 +
-+static const DseMotionPoint charged_swing[] = {
++static const BbDseMotionPoint charged_swing[] = {
 +    {  0, {0.00f, 0.00f}, {46, 106}},
 +    { 15, {0.61f, 0.13f}, {55, 108}},
 +    { 39, {0.78f, 0.39f}, {71, 119}},
@@ -723,7 +1076,7 @@ index 0000000..1e3c3f1
 +    {133, {0.00f, 0.00f}, {36,  89}},
 +};
 +
-+static const DseMotionPoint charging[] = {
++static const BbDseMotionPoint charging[] = {
 +    {  0, {0.00f, 0.00f}, {34, 102}},
 +    { 66, {0.12f, 0.06f}, {36, 103}},
 +    {235, {0.21f, 0.10f}, {39, 108}},
@@ -733,7 +1086,7 @@ index 0000000..1e3c3f1
 +    {910, {0.00f, 0.00f}, {40, 113}},
 +};
 +
-+static const DseMotionPoint thrust[] = {
++static const BbDseMotionPoint thrust[] = {
 +    { 0, {0.00f, 0.00f}, {70, 131}},
 +    { 8, {0.25f, 0.47f}, {70, 145}},
 +    {24, {0.48f, 0.68f}, {69, 143}},
@@ -741,7 +1094,7 @@ index 0000000..1e3c3f1
 +    {79, {0.00f, 0.00f}, {52,  90}},
 +};
 +
-+static const DseMotionPoint whip[] = {
++static const BbDseMotionPoint whip[] = {
 +    {  0, {0.00f, 0.00f}, {43, 104}},
 +    { 17, {0.37f, 0.06f}, {49, 107}},
 +    { 43, {0.22f, 0.18f}, {48, 125}},
@@ -750,7 +1103,7 @@ index 0000000..1e3c3f1
 +    {112, {0.00f, 0.00f}, {43, 109}},
 +};
 +
-+static const DseMotionPoint rotary[] = {
++static const BbDseMotionPoint rotary[] = {
 +    {  0, {0.00f, 0.00f}, {46,  91}},
 +    { 19, {0.34f, 0.23f}, {51, 108}},
 +    { 58, {0.59f, 0.61f}, {56, 121}},
@@ -759,7 +1112,7 @@ index 0000000..1e3c3f1
 +    {198, {0.00f, 0.00f}, {37,  88}},
 +};
 +
-+static const DseMotionPoint recoil[] = {
++static const BbDseMotionPoint recoil[] = {
 +    { 0, {0.00f, 0.00f}, {52, 125}},
 +    { 6, {0.59f, 0.87f}, {62, 139}},
 +    {23, {0.52f, 0.44f}, {48, 108}},
@@ -767,7 +1120,7 @@ index 0000000..1e3c3f1
 +    {76, {0.00f, 0.00f}, {32,  84}},
 +};
 +
-+static const DseMotionPoint cannon[] = {
++static const BbDseMotionPoint cannon[] = {
 +    {  0, {0.00f, 0.00f}, {32,  94}},
 +    { 10, {0.98f, 0.80f}, {40, 107}},
 +    { 37, {0.91f, 0.61f}, {47,  93}},
@@ -776,7 +1129,7 @@ index 0000000..1e3c3f1
 +    {235, {0.00f, 0.00f}, {29,  66}},
 +};
 +
-+static const DseMotionPoint impact_flesh[] = {
++static const BbDseMotionPoint impact_flesh[] = {
 +    { 0, {0.00f, 0.00f}, {40, 84}},
 +    {12, {0.77f, 0.58f}, {51, 98}},
 +    {29, {0.66f, 0.39f}, {46, 85}},
@@ -784,7 +1137,7 @@ index 0000000..1e3c3f1
 +    {99, {0.00f, 0.00f}, {34, 63}},
 +};
 +
-+static const DseMotionPoint impact_stone[] = {
++static const BbDseMotionPoint impact_stone[] = {
 +    { 0, {0.00f, 0.00f}, {56, 115}},
 +    { 6, {0.91f, 0.84f}, {67, 122}},
 +    {17, {0.42f, 0.27f}, {57, 108}},
@@ -793,7 +1146,7 @@ index 0000000..1e3c3f1
 +    {84, {0.00f, 0.00f}, {45,  79}},
 +};
 +
-+static const DseMotionPoint impact_wood[] = {
++static const BbDseMotionPoint impact_wood[] = {
 +    { 0, {0.00f, 0.00f}, {45, 97}},
 +    {11, {0.71f, 0.43f}, {55, 105}},
 +    {24, {0.51f, 0.30f}, {50, 93}},
@@ -801,7 +1154,7 @@ index 0000000..1e3c3f1
 +    {62, {0.00f, 0.00f}, {36, 73}},
 +};
 +
-+static const DseMotionPoint impact_metal[] = {
++static const BbDseMotionPoint impact_metal[] = {
 +    {  0, {0.00f, 0.00f}, {57, 145}},
 +    {  6, {0.76f, 0.95f}, {62, 152}},
 +    { 23, {0.29f, 0.67f}, {55, 146}},
@@ -810,27 +1163,63 @@ index 0000000..1e3c3f1
 +    {140, {0.00f, 0.00f}, {37, 128}},
 +};
 +
-+static const DseMotion combat_motions[BB_HAPTIC_ACTION_COUNT] = {
-+    [BB_HAPTIC_LIGHT_SWING] = MOTION(light_swing),
-+    [BB_HAPTIC_HEAVY_SWING] = MOTION(heavy_swing),
-+    [BB_HAPTIC_CHARGED_SWING] = MOTION(charged_swing),
-+    [BB_HAPTIC_CHARGING] = MOTION(charging),
++static const BbDseMotionPoint door[] = {
++    {  0, {0.00f, 0.00f}, {36,  78}},
++    { 15, {0.39f, 0.25f}, {46,  99}},
++    { 70, {0.20f, 0.12f}, {39,  85}},
++    {132, {0.35f, 0.27f}, {43,  94}},
++    {270, {0.57f, 0.31f}, {48,  88}},
++    {385, {0.27f, 0.26f}, {35,  79}},
++    {446, {0.10f, 0.15f}, {33,  75}},
++    {462, {0.38f, 0.49f}, {57, 131}},
++    {529, {0.00f, 0.00f}, {38,  97}},
 +};
 +
-+static const DseMotion surface_motions[BB_HAPTIC_SURFACE_COUNT] = {
-+    [BB_HAPTIC_SURFACE_FLESH] = MOTION(impact_flesh),
-+    [BB_HAPTIC_SURFACE_STONE] = MOTION(impact_stone),
-+    [BB_HAPTIC_SURFACE_WOOD] = MOTION(impact_wood),
-+    [BB_HAPTIC_SURFACE_METAL] = MOTION(impact_metal),
++static const BbDseMotionPoint ladder[] = {
++    { 0, {0.00f, 0.00f}, {45, 100}},
++    { 7, {0.09f, 0.51f}, {51, 123}},
++    {20, {0.15f, 0.36f}, {45, 103}},
++    {37, {0.23f, 0.15f}, {43,  84}},
++    {72, {0.00f, 0.00f}, {41,  74}},
 +};
 +
-+typedef struct {
-+    float duration, left, right, pitch, flutter;
-+} DseWeaponTuning;
++static const DseMotion built_in_curves[BB_DSE_CURVE_COUNT] = {
++    [BB_DSE_CURVE_LIGHT_SWING] = MOTION(light_swing),
++    [BB_DSE_CURVE_HEAVY_SWING] = MOTION(heavy_swing),
++    [BB_DSE_CURVE_CHARGED_SWING] = MOTION(charged_swing),
++    [BB_DSE_CURVE_CHARGING] = MOTION(charging),
++    [BB_DSE_CURVE_THRUST] = MOTION(thrust),
++    [BB_DSE_CURVE_WHIP] = MOTION(whip),
++    [BB_DSE_CURVE_ROTARY] = MOTION(rotary),
++    [BB_DSE_CURVE_RECOIL] = MOTION(recoil),
++    [BB_DSE_CURVE_CANNON] = MOTION(cannon),
++    [BB_DSE_CURVE_FLESH] = MOTION(impact_flesh),
++    [BB_DSE_CURVE_STONE] = MOTION(impact_stone),
++    [BB_DSE_CURVE_WOOD] = MOTION(impact_wood),
++    [BB_DSE_CURVE_METAL] = MOTION(impact_metal),
++    [BB_DSE_CURVE_DOOR] = MOTION(door),
++    [BB_DSE_CURVE_LADDER] = MOTION(ladder),
++};
++
++static const BbDseCurve combat_curves[BB_HAPTIC_ACTION_COUNT] = {
++    [BB_HAPTIC_LIGHT_SWING] = BB_DSE_CURVE_LIGHT_SWING,
++    [BB_HAPTIC_HEAVY_SWING] = BB_DSE_CURVE_HEAVY_SWING,
++    [BB_HAPTIC_CHARGED_SWING] = BB_DSE_CURVE_CHARGED_SWING,
++    [BB_HAPTIC_CHARGING] = BB_DSE_CURVE_CHARGING,
++    [BB_HAPTIC_DOOR] = BB_DSE_CURVE_DOOR,
++    [BB_HAPTIC_LADDER_STEP] = BB_DSE_CURVE_LADDER,
++};
++
++static const BbDseCurve surface_curves[BB_HAPTIC_SURFACE_COUNT] = {
++    [BB_HAPTIC_SURFACE_FLESH] = BB_DSE_CURVE_FLESH,
++    [BB_HAPTIC_SURFACE_STONE] = BB_DSE_CURVE_STONE,
++    [BB_HAPTIC_SURFACE_WOOD] = BB_DSE_CURVE_WOOD,
++    [BB_HAPTIC_SURFACE_METAL] = BB_DSE_CURVE_METAL,
++};
 +
 +/* Timing and spectral balance are based on the original bank's attack transients,
 + * compressed into a short gesture and translated to the grips' frequency range. */
-+static const DseWeaponTuning weapon_tuning[BB_HAPTIC_WEAPON_PROFILE_COUNT] = {
++static const BbDseWeaponTuning weapon_tuning[BB_HAPTIC_WEAPON_PROFILE_COUNT] = {
 +    [BB_HAPTIC_STANDARD] =          {1.00f, 1.00f, 1.00f, 1.00f, 0.00f},
 +    [BB_HAPTIC_LIGHT_BLADE] =       {0.82f, 0.82f, 1.14f, 1.09f, 0.00f},
 +    [BB_HAPTIC_LONG_BLADE] =        {1.12f, 1.10f, 0.95f, 0.91f, 0.00f},
@@ -979,35 +1368,44 @@ index 0000000..1e3c3f1
 +    return action >= BB_HAPTIC_LIGHT_SWING && action <= BB_HAPTIC_CHARGED_SWING;
 +}
 +
-+static DseMotion motion_for(const BbCombatHapticEvent *event) {
-+    if (event->surface != BB_HAPTIC_SURFACE_UNKNOWN) return surface_motions[event->surface];
++static bool is_activity(BbCombatHapticAction action) {
++    return action == BB_HAPTIC_DOOR || action == BB_HAPTIC_LADDER_STEP;
++}
++
++static BbDseCurve curve_for(const BbCombatHapticEvent *event) {
++    if (event->surface != BB_HAPTIC_SURFACE_UNKNOWN) return surface_curves[event->surface];
 +    if (event->action == BB_HAPTIC_SHOT) {
 +        switch (event->weapon) {
-+        case BB_HAPTIC_CANNON: return (DseMotion)MOTION(cannon);
-+        case BB_HAPTIC_SPRAYER: case BB_HAPTIC_ARCANE: return (DseMotion)MOTION(rotary);
-+        case BB_HAPTIC_BOW: return (DseMotion)MOTION(thrust);
-+        default: return (DseMotion)MOTION(recoil);
++        case BB_HAPTIC_CANNON: return BB_DSE_CURVE_CANNON;
++        case BB_HAPTIC_SPRAYER: case BB_HAPTIC_ARCANE: return BB_DSE_CURVE_ROTARY;
++        case BB_HAPTIC_BOW: return BB_DSE_CURVE_THRUST;
++        default: return BB_DSE_CURVE_RECOIL;
 +        }
 +    }
 +    if (is_swing(event->action)) {
 +        switch (event->weapon) {
-+        case BB_HAPTIC_THRUST: return (DseMotion)MOTION(thrust);
-+        case BB_HAPTIC_WHIP: case BB_HAPTIC_HEAVY_WHIP: return (DseMotion)MOTION(whip);
++        case BB_HAPTIC_THRUST: return BB_DSE_CURVE_THRUST;
++        case BB_HAPTIC_WHIP: case BB_HAPTIC_HEAVY_WHIP: return BB_DSE_CURVE_WHIP;
 +        case BB_HAPTIC_HAMMER: case BB_HAPTIC_LONG_AXE:
-+            if (event->action == BB_HAPTIC_LIGHT_SWING) return (DseMotion)MOTION(heavy_swing);
++            if (event->action == BB_HAPTIC_LIGHT_SWING) return BB_DSE_CURVE_HEAVY_SWING;
 +            break;
-+        case BB_HAPTIC_ROTARY: return (DseMotion)MOTION(rotary);
++        case BB_HAPTIC_ROTARY: return BB_DSE_CURVE_ROTARY;
 +        default: break;
 +        }
 +    }
-+    return combat_motions[event->action];
++    return combat_curves[event->action];
 +}
 +
 +static DseCombatPulse combat_pulse(const BbCombatHapticEvent *event) {
-+    const DseWeaponTuning tune = weapon_tuning[event->weapon];
++    BbDseWeaponTuning tune = weapon_tuning[event->weapon];
++    bb_dse_profile_tuning(event, &tune);
++    const BbDseCurve curve = curve_for(event);
++    DseMotion motion;
++    motion.points = bb_dse_profile_curve(curve, &motion.count);
++    if (!motion.points) motion = built_in_curves[curve];
 +    const bool contact = event->surface != BB_HAPTIC_SURFACE_UNKNOWN;
 +    float strength = event->strength / 255.0f;
-+    DseCombatPulse pulse = { .event = *event, .motion = motion_for(event),
++    DseCombatPulse pulse = { .event = *event, .motion = motion,
 +                             .duration = contact ? 1.0f : tune.duration,
 +                             .pitch = contact ? 1.0f : tune.pitch,
 +                             .flutter = contact ? 0.0f : tune.flutter };
@@ -1016,7 +1414,7 @@ index 0000000..1e3c3f1
 +            if (event->action == BB_HAPTIC_LIGHT_HIT) strength *= 0.76f;
 +            if (event->action == BB_HAPTIC_CHARGED_HIT) pulse.duration *= 1.24f;
 +        }
-+        if (is_swing(event->action) && pulse.motion.points != combat_motions[event->action].points) {
++        if (is_swing(event->action) && curve != combat_curves[event->action]) {
 +            const unsigned variant = (unsigned)(event->action - BB_HAPTIC_LIGHT_SWING);
 +            static const float sweep_strength[] = {0.66f, 0.84f, 1.0f};
 +            strength *= sweep_strength[variant];
@@ -1042,18 +1440,19 @@ index 0000000..1e3c3f1
 +
 +static void motion_sample(const DseCombatPulse *pulse, UINT32 frame, unsigned *point,
 +                          float level[2], float hz[2]) {
-+    const DseMotionPoint *points = pulse->motion.points;
++    const BbDseMotionPoint *points = pulse->motion.points;
 +    const float elapsed = frame / (FRAMES_PER_MS * pulse->duration);
 +    while (*point + 1 < pulse->motion.count && elapsed >= points[*point].ms)
 +        ++*point;
-+    const DseMotionPoint *from = &points[*point - 1];
-+    const DseMotionPoint *to = &points[*point];
++    const BbDseMotionPoint *from = &points[*point - 1];
++    const BbDseMotionPoint *to = &points[*point];
 +    const float t = (elapsed - from->ms) / (to->ms - from->ms);
 +    const float ripple = pulse->flutter > 0.0f ? 1.0f - pulse->flutter *
 +        (0.5f + 0.5f * sinf((float)frame * (6.283185307f * 28.0f / SAMPLE_RATE))) : 1.0f;
 +    for (unsigned grip = 0; grip < 2; ++grip) {
-+        level[grip] = ripple * pulse->gain[grip] * (from->level[grip] + t * (to->level[grip] - from->level[grip]));
-+        hz[grip] = pulse->pitch * (from->hz[grip] + t * (to->hz[grip] - from->hz[grip]));
++        const unsigned source = pulse->event.mirror ? 1 - grip : grip;
++        level[grip] = ripple * pulse->gain[grip] * (from->level[source] + t * (to->level[source] - from->level[source]));
++        hz[grip] = pulse->pitch * (from->hz[source] + t * (to->hz[source] - from->hz[source]));
 +    }
 +}
 +
@@ -1078,7 +1477,7 @@ index 0000000..1e3c3f1
 +        }
 +        for (unsigned j = 0; j < 2; ++j) {
 +            DseActuator *motor = &motors[j];
-+            const float target = SDL_max(i < active ? level[j] : 0.0f, combat_level[j]);
++            const float target = SDL_min(0.96f, SDL_max(i < active ? level[j] : 0.0f, combat_level[j]));
 +            /* Smooth strength changes over a few milliseconds. */
 +            motor->level += (target - motor->level) * 0.006f;
 +            if (target == 0.0f && motor->level < 1.0f / 32768.0f) motor->level = 0.0f;
@@ -1134,9 +1533,10 @@ index 0000000..1e3c3f1
 +        unsigned *messages = &log->combat_messages[combat.event.surface];
 +        if (!(*messages & bit) || (log->trace && combat.frame == 0)) {
 +            printf("Runtime: DualSense Edge submitted combat haptics "
-+                   "(action=%u, weapon=%u, boss=%u, system_ms=%llu, surface=%u)\n",
++                   "(action=%u, weapon=%u, boss=%u, system_ms=%llu, surface=%u, item=%lu, form=%u, mirror=%u)\n",
 +                   (unsigned)combat.event.action, (unsigned)combat.event.weapon, (unsigned)combat.event.boss,
-+                   (unsigned long long)GetTickCount64(), (unsigned)combat.event.surface);
++                   (unsigned long long)GetTickCount64(), (unsigned)combat.event.surface,
++                   (unsigned long)combat.event.weapon_id, (unsigned)combat.event.form, (unsigned)combat.event.mirror);
 +            *messages |= bit;
 +        }
 +    }
@@ -1298,14 +1698,17 @@ index 0000000..1e3c3f1
 +    if (!session || event->action <= BB_HAPTIC_NONE || event->action >= BB_HAPTIC_ACTION_COUNT ||
 +        (unsigned)event->weapon >= BB_HAPTIC_WEAPON_PROFILE_COUNT ||
 +        (unsigned)event->surface >= BB_HAPTIC_SURFACE_COUNT ||
++        (unsigned)event->form >= BB_HAPTIC_FORM_COUNT ||
 +        !select_pcm_mode(pad, session)) return false;
 +    DseCombatPulse pulse = combat_pulse(event);
 +    AcquireSRWLockExclusive(&dse.effect_lock);
 +    const bool live = InterlockedCompareExchange(&dse.active_session, 0, 0) == session;
 +    const bool playing = dse.combat.frame < dse.combat.total;
 +    const bool keep_damage = playing && is_damage(dse.combat.event.action) && !is_damage(event->action);
-+    const bool keep_impact = playing && (is_swing(event->action) || event->action == BB_HAPTIC_CHARGING) &&
-+                            !is_swing(dse.combat.event.action) && dse.combat.event.action != BB_HAPTIC_CHARGING;
++    const BbCombatHapticAction current = dse.combat.event.action;
++    const bool keep_impact = playing &&
++        (is_swing(event->action) || event->action == BB_HAPTIC_CHARGING || is_activity(event->action)) &&
++        !is_swing(current) && current != BB_HAPTIC_CHARGING && !is_activity(current);
 +    if (live && !keep_damage && !keep_impact) dse.combat = pulse;
 +    ReleaseSRWLockExclusive(&dse.effect_lock);
 +    return live;
