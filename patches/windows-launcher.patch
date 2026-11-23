@@ -1,3 +1,17 @@
+diff --git a/launcher/bbport_benchmark.py b/launcher/bbport_benchmark.py
+--- a/launcher/bbport_benchmark.py
++++ b/launcher/bbport_benchmark.py
+@@ -115,6 +115,10 @@ def scenarios(user_folder):
+     or tests/scenarios/<name>.json). Routes the player recorded are in tests/routes/<scenario id>/."""
+     found = []
+     paths = sorted(BUILTIN_SCENARIOS.glob('*.json'))
++    if getattr(sys, 'frozen', False):
++        stock = Path(sys.executable).parent / '_internal' / 'assets' / 'tests' / 'cathedral-ward.json'
++        if not (BUILTIN_SCENARIOS / stock.name).is_file() and stock.is_file():
++            paths.insert(0, stock)
+     user = Path(user_folder)
+     if user.is_dir():
+         paths += sorted(user.glob('*.json')) + sorted(user.glob('*/scenario.json'))
 diff --git a/launcher/bbport_display.py b/launcher/bbport_display.py
 index 798eeb9..a7261b0 100644
 --- a/launcher/bbport_display.py

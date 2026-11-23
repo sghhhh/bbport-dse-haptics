@@ -112,6 +112,8 @@ jobs:
           (cd "$payload" && sha256sum --quiet --check SHA256SUMS)
           docker run --rm --network none -v "$payload:/dse package:ro" ubuntu:24.04 bash -c '
             set -u
+            export HOME=$(mktemp -d)
+            unset XDG_DATA_HOME BB_GPU_USER_DIR
             export LD_BIND_NOW=1
             message=$("/dse package/bin/bb-probe" 2>&1)
             status=$?
@@ -119,6 +121,7 @@ jobs:
                 printf "%s\n" "$message"
                 exit 1
             fi
+            test -d "$HOME/.local/share/shadPS4" || exit 1
             echo "The Linux engine reached its usage screen outside the Nix store."
           '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

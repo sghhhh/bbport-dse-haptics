@@ -1170,6 +1170,18 @@ index 0000000..ccbec8b
 +#ifdef __cplusplus
 +}
 +#endif
+diff --git a/gpu/shadps4/common/path_util.cpp b/gpu/shadps4/common/path_util.cpp
+--- a/gpu/shadps4/common/path_util.cpp
++++ b/gpu/shadps4/common/path_util.cpp
+@@ -111,7 +111,7 @@ static auto UserPaths = [] {
+     std::unordered_map<PathType, fs::path> paths;
+ 
+     const auto create_path = [&](PathType shad_path, const fs::path& new_path) {
+-        std::filesystem::create_directory(new_path);
++        std::filesystem::create_directories(new_path);
+         paths.insert_or_assign(shad_path, new_path);
+     };
+ 
 diff --git a/shell.nix b/shell.nix
 index 5e2b534..75d73c1 100644
 --- a/shell.nix
