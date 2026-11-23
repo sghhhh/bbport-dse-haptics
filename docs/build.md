@@ -39,7 +39,7 @@ $seamlessSource = '.upstream/seamless/bb-probe-seamless-src'
 | `zlib` | `1.3.2-1` |
 
 ```powershell
-.\scripts\build-seamless.ps1 -SeamlessSource $seamlessSource -Clang64 C:\msys64\clang64 -DependencyPrefix .upstream/deps/clang64 -Revision bbsc100-p198-dse7
+.\scripts\build-seamless.ps1 -SeamlessSource $seamlessSource -Clang64 C:\msys64\clang64 -DependencyPrefix .upstream/deps/clang64 -Revision bbsc100-p198-dse8
 py -3.12 -m venv .build/venv
 .\.build\venv\Scripts\python.exe -m pip install pyinstaller==6.22.3 pillow==13.0.0
 .\scripts\build-launcher.ps1 -WindowsSource .upstream/windows
@@ -66,6 +66,12 @@ mods/DSE Haptics/dvdroot_ps4/other/bbport-dse-haptics.json
 在启动器「模组与补丁」启用、禁用或调整数据包的顺序。游戏启动时读取最终生效的模组配置。最终配置缺失或无效时，引擎使用内置参数。修改模组顺序或文件后，重启游戏即可重新读取配置。
 
 打开该副本的启动器，设置原本的游戏目录，用 USB 连接 DualSense Edge。在「控制 → 手柄」启用「DSE 高级震动（离线）」，然后点「开始游戏」。中文玩家可在「玩法 → 语言 → 文本语言」选择简体或繁体中文，bbport 会读取游戏目录里的对应语言资源。
+
+## Linux x86-64
+
+Linux 对应源码为上游 [`linux-seamless-beta.1`](https://github.com/Supermedo/bloodborne_pc/releases/tag/linux-seamless-beta.1) 的 `bb-probe-seamless-linux-beta.1-source.zip`，SHA-256 为 `9d85c78d99c89f51dfc8cba979abb4ce2b544a2c5797a4fc7c99afad27bcc114`。解压后进入含 `build.sh` 的目录，用 Git 应用本仓库的 `patches/seamless-linux-dse-haptics.patch`，再执行 `scripts/build-seamless-linux.sh` 并传入该源码目录。需要 SDL3、ALSA 与上游 Vulkan 引擎依赖，源码自带 `shell.nix`。
+
+输出是 `out/bb-probe`、`out/bb-gpu-capabilities` 与 `out/gpu/libbbgpu.so`。发布版使用 Nixpkgs `93a9ed0a866099a230ed5146a5bb7d16fd5c9b14` 的 GCC 16.2、SDL 3.4.18、ALSA 1.2.16.1 与 Vulkan 1.4.363。用 Nix 构建的 ELF 依赖所选 Nix store 的运行库，发布包带有匹配的运行库与入口脚本。[二进制安装](releases.md)
 
 ## 许可证与致谢
 

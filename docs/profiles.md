@@ -31,9 +31,11 @@ The profile version is `1`. `curves`, `profiles` and `weapons` are optional. Tun
 - `duration` runs from `0.5` to `2.0`. `pitch` runs from `0.6` to `1.5`. These scale motion and recoil cues. A contact uses its material curve's own timing and pitch.
 - `left` and `right` scale the grip levels from `0` to `1.6`. `flutter` adds rapid amplitude variation from `0` to `0.70` to motion and recoil cues.
 - Each curve point contains `[milliseconds, left level, right level, left Hz, right Hz]`. Use 2 to 64 points starting at 0 ms and increasing up to 2500 ms. Levels run from `0` to `1`, and frequencies from `20` to `250` Hz. End a curve at zero level for a gradual finish.
-- Surface curves are `stone`, `wood`, `metal` and `flesh`. Traversal curves are `door` and `ladder`. The ladder curve mirrors across the grips for the other hand.
+- Surface curves are `stone`, `wood`, `metal` and `flesh`. World and movement curves are `door`, `ladder`, `lever`, `lamp`, `fog`, `chest` and `dodge`. `lamp` is the first ignition. Ladder pulses mirror across the grips. `pickup`, `heal` and `transform` control item receipts, recovery and weapon changes.
 
 已在模组内提供武器、形态和材质的完整示例。`duration` 控制动作长短，`left` 和 `right` 控制两个握把的强度，`pitch` 控制频率，`flutter` 控制细碎振幅变化。材质可直接调整 `curves` 对应点的时刻与频率。启动日志会记录加载的包，配置有误时也会列出原因。
+
+常见互动对应 `lever` 拉杆、`lamp` 首次点灯、`fog` 穿雾、`chest` 开箱、`pickup` 获得物品、`heal` 治疗、`transform` 变形、`dodge` 闪避。对应曲线中的两个强度都设为零可让该动作保持安静。
 
 ## Weapon IDs | 武器 ID
 

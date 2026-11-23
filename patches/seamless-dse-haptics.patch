@@ -13,10 +13,10 @@ index 505bbc9..900fdd1 100644
      # Clang 23 added -Wunused-but-set-global (on with -Wall): the runtime keeps a few
 diff --git a/gpu/seamless/bbcoop/combat_haptics.cpp b/gpu/seamless/bbcoop/combat_haptics.cpp
 new file mode 100644
-index 0000000..cf57633
+index 0000000..b4bd368
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/combat_haptics.cpp
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,695 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "bbcoop/combat_haptics.h"
 +
@@ -55,6 +55,13 @@ index 0000000..cf57633
 +constexpr std::array<u8, 8> ScriptPrologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56};
 +constexpr u64 ObjectActionOffset = 0x013AEB69;
 +constexpr std::array<u8, 7> ObjectAction{0x89, 0x41, 0x20, 0x48, 0x8B, 0x4A, 0x20};
++constexpr u64 RotateActionOffset = 0x013E116D;
++constexpr std::array<u8, 8> RotateAction{0x44, 0x89, 0x60, 0x20, 0x48, 0x8B, 0x41, 0x20};
++constexpr u64 ItemReceiptOffset = 0x016D896E;
++constexpr std::array<u8, 7> ItemReceipt{0x48, 0x89, 0x08, 0x48, 0x89, 0x43, 0x08};
++constexpr u64 ItemReceiptQueueOffset = 0x0553B1C0;
++constexpr u64 EffectAppliedOffset = 0x018C6AAC;
++constexpr std::array<u8, 7> EffectApplied{0x49, 0x8B, 0x45, 0x00, 0x4C, 0x89, 0xEF};
 +constexpr u64 MapImpactOffset = 0x018837C0;
 +constexpr std::array<u8, 8> MapImpact{0x49, 0x63, 0x45, 0x5C, 0x49, 0x63, 0x4D, 0x64};
 +constexpr u64 ObjectImpactOffset = 0x015A5348;
@@ -100,9 +107,19 @@ index 0000000..cf57633
 +std::atomic_bool heavy_down;
 +bool charge_active, last_world_object;
 +Clock::time_point last_swing, last_hit, last_shot, last_world;
-+Clock::time_point last_door, last_ladder_step;
++std::array<Clock::time_point, BB_HAPTIC_ACTION_COUNT> last_activity;
 +std::array<Melee, 24> recent_melee;
 +size_t next_melee;
++
++bool QueueActivity(BbCombatHapticEvent event, std::chrono::milliseconds interval) {
++    std::scoped_lock lock(event_lock);
++    const auto now = Clock::now();
++    auto& last = last_activity[static_cast<size_t>(event.action)];
++    if (now - last < interval) return false;
++    last = now;
++    activity = {event, now};
++    return true;
++}
 +
 +u64 Player() {
 +    const u64 world = TryRead<u64>(guest_image, Coop::CandidateLocalStatePointerOffset).value_or(0);
@@ -444,51 +461,158 @@ index 0000000..cf57633
 +
 +void PS4_SYSV_ABI OnObjectAction(u64, const GuestRegisterSnapshot* registers) {
 +    if (!enabled) return;
-+    // ObjAct has accepted the actor and is committing the player's push-open animation.
++    // ObjAct has accepted the actor and is committing the selected ObjActParam animation.
 +    const auto animation = static_cast<u32>(registers->rax);
-+    if (animation < 101110 || animation > 101112 || !registers->r12 || registers->r12 != Player()) return;
-+    std::scoped_lock lock(event_lock);
-+    const auto now = Clock::now();
-+    if (now - last_door < 1200ms) return;
-+    last_door = now;
-+    activity = {{BB_HAPTIC_DOOR, BB_HAPTIC_STANDARD, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, now};
-+    if (trace_contacts) LOG_NOTICE(Loader, "DSE local heavy door animation {}", animation);
++    BbCombatHapticAction action;
++    const char* name;
++    switch (animation) {
++    case 101110: case 101111: case 101112:
++        action = BB_HAPTIC_DOOR;
++        name = "heavy door";
++        break;
++    case 101150: case 101151: case 101230:
++        action = BB_HAPTIC_LEVER;
++        name = "lever pull";
++        break;
++    case 101141: case 101142: case 101143:
++        action = BB_HAPTIC_CHEST;
++        name = "chest open";
++        break;
++    default:
++        return;
++    }
++    if (!registers->r12 || registers->r12 != Player()) return;
++    if (QueueActivity({action, BB_HAPTIC_STANDARD, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, 1200ms) && trace_contacts)
++        LOG_NOTICE(Loader, "DSE local {} animation {}", name, animation);
++}
++
++void PS4_SYSV_ABI OnRotateAction(u64, const GuestRegisterSnapshot* registers) {
++    if (!enabled) return;
++    // RotateCharacter has resolved the target and the actor and is committing its animation.
++    const auto animation = static_cast<u32>(registers->r12);
++    BbCombatHapticAction action;
++    const char* name;
++    switch (animation) {
++    case 101130:  // The local script starts the fog traversal.
++        action = BB_HAPTIC_FOG;
++        name = "fog traversal";
++        break;
++    case 101170:  // Common event 7100 runs once on a new lamp's light request.
++        action = BB_HAPTIC_LAMP;
++        name = "lamp lighting";
++        break;
++    default:
++        return;
++    }
++    if (!registers->r15 || registers->r15 != Player()) return;
++    if (QueueActivity({action, BB_HAPTIC_STANDARD, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, 1200ms) && trace_contacts)
++        LOG_NOTICE(Loader, "DSE local {} animation {}", name, animation);
++}
++
++void PS4_SYSV_ABI OnItemReceipt(u64, const GuestRegisterSnapshot* registers) {
++    if (!enabled) return;
++    // Inventory delivery has succeeded and is linking a receipt into the local popup queue.
++    const u64 queue = TryRead<u64>(guest_image, ItemReceiptQueueOffset).value_or(0);
++    if (!queue || registers->rbx != queue || !Player()) return;
++    const s32 item = TryRead<s32>(registers->rax, 0x10).value_or(-1);
++    const s32 count = TryRead<s32>(registers->rax, 0x14).value_or(0);
++    if (item < 0 || count <= 0) return;
++    if (QueueActivity({BB_HAPTIC_PICKUP, BB_HAPTIC_STANDARD, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN}, 400ms) &&
++        trace_contacts) {
++        LOG_NOTICE(Loader, "DSE local item receipt {} count {}", item, count);
++    }
++}
++
++void PS4_SYSV_ABI OnEffectApplied(u64, const GuestRegisterSnapshot* registers) {
++    if (!enabled || static_cast<u8>(registers->r12) != 1) return;
++    const auto effect = static_cast<u32>(registers->r14);
++    BbCombatHapticAction action;
++    switch (effect) {
++    case 206: // The native weapon transformation animation's mode-change effect.
++        action = BB_HAPTIC_TRANSFORM;
++        break;
++    case 392: case 393: // The roll / quickstep animation's judgment effects.
++        action = BB_HAPTIC_DODGE;
++        break;
++    case 3010: case 3020: case 3030: case 3040: case 3060:
++        action = BB_HAPTIC_HEAL;
++        break;
++    default:
++        return;
++    }
++    // R12B is the successful return from the common applicator, and R13 is the recipient.
++    const u64 player = Player();
++    if (!player || registers->r13 != player) return;
++    const u32 item = action == BB_HAPTIC_TRANSFORM ? EquippedWeapon(player) : 0;
++    const auto weapon = item ? MeleeProfile(WeaponVariation(item), 0, 255) : BB_HAPTIC_STANDARD;
++    const auto strength = static_cast<uint8_t>(effect == 393 ? 210 : 255);
++    const auto interval = action == BB_HAPTIC_DODGE ? 135ms : action == BB_HAPTIC_TRANSFORM ? 350ms : 500ms;
++    if (QueueActivity({action, weapon, strength, 0, BB_HAPTIC_SURFACE_UNKNOWN, item}, interval) && trace_contacts)
++        LOG_NOTICE(Loader, "DSE local activity effect {} action {}", effect, static_cast<unsigned>(action));
 +}
 +
 +void PS4_SYSV_ABI OnPlayerAnimation(u64 entering, const GuestRegisterSnapshot* registers) {
 +    const bool charging = heavy_down.load(std::memory_order_relaxed);
 +    if (!enabled || (!entering && !charging)) return;
 +    constexpr std::string_view charge_prefix = "AtkPowerLoop";
++    constexpr std::string_view transform_prefix = "ChangeGimmick";
 +    // Havok's script generator stores tagged hkStringPtr callback expressions.
 +    const u64 script = TryRead<u64>(registers->rdi, entering ? 0x90 : 0xB0).value_or(0) & ~u64{1};
-+    const auto name = TryRead<std::array<char, charge_prefix.size()>>(script, 0);
++    const auto name = TryRead<std::array<char, transform_prefix.size()>>(script, 0);
 +    if (!name) return;
 +    const std::string_view prefix{name->data(), name->size()};
-+    const bool charge_loop = charging && prefix == charge_prefix;
++    const bool charge_loop = charging && prefix.starts_with(charge_prefix);
 +    const bool ladder = entering && prefix.starts_with("Ladder_");
-+    if (!charge_loop && !ladder) return;
++    const bool dodge = entering && (prefix.starts_with("Rolling") || prefix.starts_with("Step"));
++    const bool transform = entering && prefix == transform_prefix;
++    if (!charge_loop && !ladder && !dodge && !transform) return;
 +
 +    const u64 player = Player();
 +    const u64 character = TryRead<u64>(registers->rsi, 0).value_or(0);
 +    if (!player || !character || HavokCharacter(player) != character) return;
 +
-+    std::scoped_lock lock(event_lock);
-+    const auto now = Clock::now();
-+    if (ladder) {
-+        const auto text = TryRead<std::array<char, 40>>(script, 0);
-+        if (!text || now - last_ladder_step < 85ms) return;
++    if (!charge_loop) {
++        const auto text = TryRead<std::array<char, 48>>(script, 0);
++        if (!text) return;
 +        const auto end = std::find(text->begin(), text->end(), '\0');
 +        const std::string_view state{text->data(), static_cast<size_t>(end - text->begin())};
-+        const bool left = state == "Ladder_Up_Left_onActivate()" || state == "Ladder_Down_Left_onActivate()";
-+        const bool right = state == "Ladder_Up_Right_onActivate()" || state == "Ladder_Down_Right_onActivate()";
-+        if (!left && !right) return;
-+        last_ladder_step = now;
-+        const auto strength = static_cast<uint8_t>(state.starts_with("Ladder_Up_") ? 230 : 204);
-+        activity = {{BB_HAPTIC_LADDER_STEP, BB_HAPTIC_STANDARD, strength, 0, BB_HAPTIC_SURFACE_UNKNOWN,
-+                     0, BB_HAPTIC_FORM_NORMAL, static_cast<uint8_t>(left)}, now};
-+        if (trace_contacts) LOG_NOTICE(Loader, "DSE local ladder step {}", left ? "left" : "right");
++        if (ladder) {
++            const bool left = state == "Ladder_Up_Left_onActivate()" || state == "Ladder_Down_Left_onActivate()";
++            const bool right = state == "Ladder_Up_Right_onActivate()" || state == "Ladder_Down_Right_onActivate()";
++            if (!left && !right) return;
++            const auto strength = static_cast<uint8_t>(state.starts_with("Ladder_Up_") ? 230 : 204);
++            const BbCombatHapticEvent step{BB_HAPTIC_LADDER_STEP, BB_HAPTIC_STANDARD, strength, 0,
++                                         BB_HAPTIC_SURFACE_UNKNOWN, 0, BB_HAPTIC_FORM_NORMAL,
++                                         static_cast<uint8_t>(left)};
++            if (QueueActivity(step, 85ms) && trace_contacts)
++                LOG_NOTICE(Loader, "DSE local ladder step {}", left ? "left" : "right");
++        } else if (dodge) {
++            const bool rolling = state == "Rolling_onActivate()" || state == "Rolling00_onActivate()";
++            const bool quickstep = state == "Step_onActivate()" || state == "Step00_onActivate()";
++            if (!rolling && !quickstep) return;
++            const auto strength = static_cast<uint8_t>(rolling ? 255 : 210);
++            if (QueueActivity({BB_HAPTIC_DODGE, BB_HAPTIC_STANDARD, strength, 0, BB_HAPTIC_SURFACE_UNKNOWN}, 135ms) &&
++                trace_contacts) {
++                LOG_NOTICE(Loader, "DSE local dodge {}", state);
++            }
++        } else {
++            const bool left = state == "ChangeGimmick_LeftSide_ModeA_onActivate()" ||
++                              state == "ChangeGimmick_LeftSide_ModeB_onActivate()";
++            const bool right = state == "ChangeGimmick_RightSide_ModeA_onActivate()" ||
++                               state == "ChangeGimmick_RightSide_ModeB_onActivate()";
++            if (!left && !right) return;
++            const u32 item = EquippedWeapon(player, left);
++            if (!item) return;
++            const auto weapon = MeleeProfile(WeaponVariation(item), 0, 255);
++            if (QueueActivity({BB_HAPTIC_TRANSFORM, weapon, 255, 0, BB_HAPTIC_SURFACE_UNKNOWN, item}, 350ms) &&
++                trace_contacts) {
++                LOG_NOTICE(Loader, "DSE local weapon transform {} item {}", state, item);
++            }
++        }
 +        return;
 +    }
++    std::scoped_lock lock(event_lock);
++    const auto now = Clock::now();
 +    if (!heavy_down || charge_active == (entering != 0)) return;
 +    charge_active = entering != 0;
 +    const auto action = charge_active ? BB_HAPTIC_CHARGING : BB_HAPTIC_CHARGE_ENDED;
@@ -541,15 +665,25 @@ index 0000000..cf57633
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + MapImpactOffset), MapImpact, 0, OnWorldImpact);
 +    const bool object_impacts = Matches(ObjectImpactOffset, ObjectImpact) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ObjectImpactOffset), ObjectImpact, 1, OnWorldImpact);
-+    const bool doors = Matches(ObjectActionOffset, ObjectAction) &&
++    const bool objects = Matches(ObjectActionOffset, ObjectAction) &&
 +        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ObjectActionOffset), ObjectAction, 0, OnObjectAction);
++    const bool scripted = Matches(RotateActionOffset, RotateAction) &&
++        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + RotateActionOffset), RotateAction, 0, OnRotateAction);
++    const bool pickup = Matches(ItemReceiptOffset, ItemReceipt) &&
++        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + ItemReceiptOffset), ItemReceipt, 0, OnItemReceipt);
++    const bool healing = Matches(EffectAppliedOffset, EffectApplied) &&
++        Core::InstallGuestCodeHook(reinterpret_cast<void*>(image + EffectAppliedOffset), EffectApplied, 0,
++                                   OnEffectApplied);
 +    enabled = true;
 +    LOG_NOTICE(Loader, "DSE combat haptics: confirmed hits and damage enabled, projectiles {}, swings {}, charging {}, "
-+                       "map impacts {}, object impacts {}, doors {}, ladder steps {}",
++                       "map impacts {}, object impacts {}, object actions {}, scripted actions {}, ladder steps {}, "
++                       "item receipts {}, healing {}",
 +               projectiles ? "enabled" : "unavailable", swings ? "enabled" : "unavailable",
 +               animation && charge_exit ? "enabled" : "unavailable", map_impacts ? "enabled" : "unavailable",
-+               object_impacts ? "enabled" : "unavailable", doors ? "enabled" : "unavailable",
-+               animation ? "enabled" : "unavailable");
++               object_impacts ? "enabled" : "unavailable", objects ? "enabled" : "unavailable",
++               scripted ? "enabled" : "unavailable",
++               animation ? "enabled" : "unavailable", pickup ? "enabled" : "unavailable",
++               healing ? "enabled" : "unavailable");
 +}
 +
 +extern "C" int bb_dse_combat_input(int heavy) {
@@ -580,10 +714,10 @@ index 0000000..cf57633
 +}
 diff --git a/gpu/seamless/bbcoop/combat_haptics.h b/gpu/seamless/bbcoop/combat_haptics.h
 new file mode 100644
-index 0000000..b380ec6
+index 0000000..10e8e33
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/combat_haptics.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,97 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -609,6 +743,14 @@ index 0000000..b380ec6
 +    BB_HAPTIC_WORLD_IMPACT,
 +    BB_HAPTIC_DOOR,
 +    BB_HAPTIC_LADDER_STEP,
++    BB_HAPTIC_LEVER,
++    BB_HAPTIC_LAMP,
++    BB_HAPTIC_FOG,
++    BB_HAPTIC_CHEST,
++    BB_HAPTIC_PICKUP,
++    BB_HAPTIC_HEAL,
++    BB_HAPTIC_TRANSFORM,
++    BB_HAPTIC_DODGE,
 +    BB_HAPTIC_ACTION_COUNT,
 +} BbCombatHapticAction;
 +
@@ -674,7 +816,7 @@ index 0000000..b380ec6
 +}
 +#endif
 diff --git a/gpu/seamless/bbcoop/coop.cpp b/gpu/seamless/bbcoop/coop.cpp
-index d1471bf..20ca8ac 100644
+index d1471bf..c5c1088 100644
 --- a/gpu/seamless/bbcoop/coop.cpp
 +++ b/gpu/seamless/bbcoop/coop.cpp
 @@ -20,6 +20,7 @@
@@ -685,22 +827,24 @@ index d1471bf..20ca8ac 100644
  #include "bbcoop/lobby_rows.h"
  #include "bbcoop_revision.h"
  #include "common/logging/log.h"
-@@ -135,6 +136,9 @@ extern "C" void bbcoop_install(unsigned char* image, uint64_t eboot_size, void*
-     const auto loader_filter = SetUnhandledExceptionFilter(nullptr);
-     Core::Bloodborne::InstallCrashCatcher(reinterpret_cast<u64>(image), eboot_size);
+@@ -137,6 +138,11 @@ extern "C" void bbcoop_install(unsigned char* image, uint64_t eboot_size, void*
      SetUnhandledExceptionFilter(loader_filter);
+ #else
+     Core::Bloodborne::InstallCrashCatcher(reinterpret_cast<u64>(image), eboot_size);
++#endif
++#if defined(_WIN32) || defined(__linux__)
 +    const std::string app_version{param_sfo->GetString("APP_VER").value_or("")};
 +    bb_dse_combat_install(reinterpret_cast<u64>(image), eboot_size,
 +                          MemoryPatcher::g_game_serial.c_str(), app_version.c_str());
- #else
-     Core::Bloodborne::InstallCrashCatcher(reinterpret_cast<u64>(image), eboot_size);
  #endif
+     Core::Bloodborne::InstallSeamlessCoopPatches();
+     Core::Bloodborne::InstallReverseEngineeringTrace();
 diff --git a/gpu/seamless/bbcoop/haptic_profiles.cpp b/gpu/seamless/bbcoop/haptic_profiles.cpp
 new file mode 100644
-index 0000000..af52720
+index 0000000..e098400
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/haptic_profiles.cpp
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,189 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "bbcoop/haptic_profiles.h"
 +
@@ -725,6 +869,7 @@ index 0000000..af52720
 +constexpr std::array<std::string_view, BB_DSE_CURVE_COUNT> CurveNames{
 +    "", "light_swing", "heavy_swing", "charged_swing", "charging", "thrust", "whip",
 +    "rotary", "recoil", "cannon", "flesh", "stone", "wood", "metal", "door", "ladder",
++    "lever", "lamp", "fog", "chest", "pickup", "heal", "transform", "dodge",
 +};
 +constexpr std::array<std::string_view, BB_HAPTIC_WEAPON_PROFILE_COUNT> ProfileNames{
 +    "standard", "light_blade", "long_blade", "thrust", "fist", "saw", "extended_saw",
@@ -891,10 +1036,10 @@ index 0000000..af52720
 +}
 diff --git a/gpu/seamless/bbcoop/haptic_profiles.h b/gpu/seamless/bbcoop/haptic_profiles.h
 new file mode 100644
-index 0000000..2c523c0
+index 0000000..ccbec8b
 --- /dev/null
 +++ b/gpu/seamless/bbcoop/haptic_profiles.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,53 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -921,6 +1066,14 @@ index 0000000..2c523c0
 +    BB_DSE_CURVE_METAL,
 +    BB_DSE_CURVE_DOOR,
 +    BB_DSE_CURVE_LADDER,
++    BB_DSE_CURVE_LEVER,
++    BB_DSE_CURVE_LAMP,
++    BB_DSE_CURVE_FOG,
++    BB_DSE_CURVE_CHEST,
++    BB_DSE_CURVE_PICKUP,
++    BB_DSE_CURVE_HEAL,
++    BB_DSE_CURVE_TRANSFORM,
++    BB_DSE_CURVE_DODGE,
 +    BB_DSE_CURVE_COUNT,
 +} BbDseCurve;
 +
@@ -941,14 +1094,14 @@ index 0000000..2c523c0
 +}
 +#endif
 diff --git a/src/probe.c b/src/probe.c
-index 580892c..c47d6f8 100644
+index 580892c..f19c42e 100644
 --- a/src/probe.c
 +++ b/src/probe.c
 @@ -10,6 +10,9 @@
  #include "gpu/bbgpu.h"
  #include "gpu/seamless/bbcoop.h"
  #include "gpu/seamless/ui/coop_ui.h"
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +#include "gpu/seamless/bbcoop/haptic_profiles.h"
 +#endif
  #if !defined(__x86_64__) || !defined(__GNUC__)
@@ -958,7 +1111,7 @@ index 580892c..c47d6f8 100644
      }
      if (app0) {
          runtime_file_configure(app0, user_dir ? user_dir : "user");
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +        bb_dse_profiles_load(app0);
 +#endif
          char sfo[4096], id[16]="";
@@ -966,13 +1119,15 @@ index 580892c..c47d6f8 100644
          if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
 diff --git a/src/runtime_dse_haptics.c b/src/runtime_dse_haptics.c
 new file mode 100644
-index 0000000..62d8fbc
+index 0000000..f2da5d3
 --- /dev/null
 +++ b/src/runtime_dse_haptics.c
-@@ -0,0 +1,751 @@
+@@ -0,0 +1,1032 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +
++#define _GNU_SOURCE
++#ifdef _WIN32
 +#define COBJMACROS
 +#include <windows.h>
 +#include <initguid.h>
@@ -984,10 +1139,19 @@ index 0000000..62d8fbc
 +#include <process.h>
 +#include <propkeydef.h>
 +#include <functiondiscoverykeys_devpkey.h>
++#else
++#include <alsa/asoundlib.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdlib.h>
++#include <unistd.h>
++#endif
 +#include <SDL3/SDL.h>
 +#include <math.h>
++#include <pthread.h>
 +#include <stdint.h>
 +#include <stdio.h>
++#include <string.h>
 +
 +#include "runtime_dse_haptics.h"
 +#include "gpu/seamless/bbcoop/haptic_profiles.h"
@@ -1000,6 +1164,7 @@ index 0000000..62d8fbc
 +    SONY = 0x054c,
 +    DUALSENSE_EDGE = 0x0df2,
 +};
++#ifdef _WIN32
 +_Static_assert(sizeof(WAVEFORMATEX) == 18 && sizeof(WAVEFORMATEXTENSIBLE) == 40, "WASAPI PCM layout");
 +
 +/* Some Windows SDKs declare these COM IDs without providing them in the import libraries. */
@@ -1011,10 +1176,11 @@ index 0000000..62d8fbc
 +    {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}};
 +static const GUID audio_render_iid = {0xf294acfc, 0x3146, 0x4483,
 +    {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}};
++#endif
 +
 +typedef struct {
 +    Uint64 end_ms;
-+    UINT32 onset_frames;
++    Uint32 onset_frames;
 +    Uint8 low, high;
 +} DseEffect;
 +
@@ -1183,6 +1349,77 @@ index 0000000..62d8fbc
 +    {72, {0.00f, 0.00f}, {41,  74}},
 +};
 +
++static const BbDseMotionPoint lever[] = {
++    {  0, {0.00f, 0.00f}, {42, 104}},
++    { 16, {0.34f, 0.46f}, {50, 122}},
++    { 67, {0.16f, 0.10f}, {39,  81}},
++    {125, {0.56f, 0.25f}, {46,  93}},
++    {197, {0.16f, 0.08f}, {36,  80}},
++    {214, {0.36f, 0.68f}, {59, 145}},
++    {283, {0.00f, 0.00f}, {42, 107}},
++};
++
++static const BbDseMotionPoint lamp[] = {
++    {  0, {0.00f, 0.00f}, {37,  85}},
++    { 45, {0.10f, 0.16f}, {42, 106}},
++    {126, {0.29f, 0.35f}, {52, 133}},
++    {238, {0.41f, 0.54f}, {59, 150}},
++    {368, {0.31f, 0.24f}, {50, 139}},
++    {484, {0.12f, 0.08f}, {42, 115}},
++    {594, {0.00f, 0.00f}, {34,  97}},
++};
++
++static const BbDseMotionPoint fog[] = {
++    {  0, {0.00f, 0.00f}, {31,  72}},
++    { 54, {0.25f, 0.08f}, {40,  86}},
++    {130, {0.51f, 0.22f}, {46, 106}},
++    {248, {0.24f, 0.52f}, {40, 121}},
++    {380, {0.10f, 0.18f}, {34,  89}},
++    {473, {0.00f, 0.00f}, {31,  71}},
++};
++
++static const BbDseMotionPoint chest[] = {
++    {  0, {0.00f, 0.00f}, {38, 113}},
++    { 13, {0.14f, 0.53f}, {47, 136}},
++    { 62, {0.06f, 0.08f}, {36,  92}},
++    {132, {0.46f, 0.21f}, {49,  91}},
++    {211, {0.13f, 0.09f}, {39,  75}},
++    {262, {0.00f, 0.00f}, {34,  69}},
++};
++
++static const BbDseMotionPoint pickup[] = {
++    { 0, {0.00f, 0.00f}, {62, 115}},
++    { 8, {0.13f, 0.43f}, {75, 148}},
++    {22, {0.05f, 0.15f}, {69, 128}},
++    {37, {0.09f, 0.28f}, {82, 145}},
++    {65, {0.00f, 0.00f}, {61, 119}},
++};
++
++static const BbDseMotionPoint heal[] = {
++    {  0, {0.00f, 0.00f}, {34,  76}},
++    { 21, {0.63f, 0.40f}, {49,  86}},
++    { 79, {0.17f, 0.11f}, {39,  74}},
++    {132, {0.44f, 0.32f}, {44,  93}},
++    {223, {0.13f, 0.11f}, {37,  76}},
++    {301, {0.00f, 0.00f}, {32,  67}},
++};
++
++static const BbDseMotionPoint transform[] = {
++    {  0, {0.00f, 0.00f}, {51, 102}},
++    { 11, {0.47f, 0.24f}, {61, 122}},
++    { 42, {0.18f, 0.17f}, {50, 100}},
++    { 83, {0.26f, 0.69f}, {65, 153}},
++    {143, {0.08f, 0.23f}, {48, 126}},
++    {194, {0.00f, 0.00f}, {41,  92}},
++};
++
++static const BbDseMotionPoint dodge[] = {
++    {  0, {0.00f, 0.00f}, {37,  75}},
++    { 28, {0.16f, 0.22f}, {50, 105}},
++    { 58, {0.21f, 0.15f}, {45,  88}},
++    {108, {0.00f, 0.00f}, {34,  69}},
++};
++
 +static const DseMotion built_in_curves[BB_DSE_CURVE_COUNT] = {
 +    [BB_DSE_CURVE_LIGHT_SWING] = MOTION(light_swing),
 +    [BB_DSE_CURVE_HEAVY_SWING] = MOTION(heavy_swing),
@@ -1199,6 +1436,14 @@ index 0000000..62d8fbc
 +    [BB_DSE_CURVE_METAL] = MOTION(impact_metal),
 +    [BB_DSE_CURVE_DOOR] = MOTION(door),
 +    [BB_DSE_CURVE_LADDER] = MOTION(ladder),
++    [BB_DSE_CURVE_LEVER] = MOTION(lever),
++    [BB_DSE_CURVE_LAMP] = MOTION(lamp),
++    [BB_DSE_CURVE_FOG] = MOTION(fog),
++    [BB_DSE_CURVE_CHEST] = MOTION(chest),
++    [BB_DSE_CURVE_PICKUP] = MOTION(pickup),
++    [BB_DSE_CURVE_HEAL] = MOTION(heal),
++    [BB_DSE_CURVE_TRANSFORM] = MOTION(transform),
++    [BB_DSE_CURVE_DODGE] = MOTION(dodge),
 +};
 +
 +static const BbDseCurve combat_curves[BB_HAPTIC_ACTION_COUNT] = {
@@ -1208,6 +1453,14 @@ index 0000000..62d8fbc
 +    [BB_HAPTIC_CHARGING] = BB_DSE_CURVE_CHARGING,
 +    [BB_HAPTIC_DOOR] = BB_DSE_CURVE_DOOR,
 +    [BB_HAPTIC_LADDER_STEP] = BB_DSE_CURVE_LADDER,
++    [BB_HAPTIC_LEVER] = BB_DSE_CURVE_LEVER,
++    [BB_HAPTIC_LAMP] = BB_DSE_CURVE_LAMP,
++    [BB_HAPTIC_FOG] = BB_DSE_CURVE_FOG,
++    [BB_HAPTIC_CHEST] = BB_DSE_CURVE_CHEST,
++    [BB_HAPTIC_PICKUP] = BB_DSE_CURVE_PICKUP,
++    [BB_HAPTIC_HEAL] = BB_DSE_CURVE_HEAL,
++    [BB_HAPTIC_TRANSFORM] = BB_DSE_CURVE_TRANSFORM,
++    [BB_HAPTIC_DODGE] = BB_DSE_CURVE_DODGE,
 +};
 +
 +static const BbDseCurve surface_curves[BB_HAPTIC_SURFACE_COUNT] = {
@@ -1247,7 +1500,7 @@ index 0000000..62d8fbc
 +
 +typedef struct {
 +    BbCombatHapticEvent event;
-+    UINT32 strike_end, total, frame;
++    Uint32 strike_end, total, frame;
 +    float strike[2], tail[2];
 +    DseMotion motion;
 +    float gain[2];
@@ -1255,32 +1508,38 @@ index 0000000..62d8fbc
 +} DseCombatPulse;
 +
 +static struct {
++#ifdef _WIN32
 +    WCHAR hid_path[1024];
 +    HANDLE stop, thread;
-+    volatile LONG active_session;
-+    LONG pcm_session;
-+    SRWLOCK effect_lock;
++#else
++    char hid_path[PATH_MAX];
++    SDL_AtomicInt stop;
++    SDL_Thread *thread;
++#endif
++    SDL_AtomicInt active_session;
++    int pcm_session;
++    pthread_mutex_t effect_lock;
 +    DseEffect effect;
 +    DseCombatPulse combat;
-+} dse = { .effect_lock = SRWLOCK_INIT };
++} dse = { .effect_lock = PTHREAD_MUTEX_INITIALIZER };
 +
 +static void clear_effect(void) {
-+    AcquireSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_lock(&dse.effect_lock);
 +    dse.effect = (DseEffect){0};
 +    dse.combat = (DseCombatPulse){0};
-+    ReleaseSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_unlock(&dse.effect_lock);
 +}
 +
 +void runtime_dse_cancel(void) {
 +    if (dse.thread) clear_effect();
 +}
 +
-+static bool queue_rumble(LONG session, Uint8 low, Uint8 high, Uint32 duration_ms) {
-+    AcquireSRWLockExclusive(&dse.effect_lock);
-+    const bool live = InterlockedCompareExchange(&dse.active_session, 0, 0) == session;
++static bool queue_rumble(int session, Uint8 low, Uint8 high, Uint32 duration_ms) {
++    pthread_mutex_lock(&dse.effect_lock);
++    const bool live = SDL_GetAtomicInt(&dse.active_session) == session;
 +    if (live) {
 +        if ((!low && !high) || !duration_ms) {
-+            /* The game can start and stop a pulse between two WASAPI events. Stop the
++            /* The game can start and stop a pulse between two audio writes. Stop the
 +             * sustained part now, but let the renderer submit any remaining onset. */
 +            dse.effect.end_ms = 0;
 +        } else {
@@ -1291,10 +1550,11 @@ index 0000000..62d8fbc
 +            dse.effect.high = high;
 +        }
 +    }
-+    ReleaseSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_unlock(&dse.effect_lock);
 +    return live;
 +}
 +
++#ifdef _WIN32
 +static bool hid_container(GUID *container) {
 +    WCHAR instance[MAX_DEVICE_ID_LEN];
 +    ULONG size = sizeof(instance);
@@ -1356,6 +1616,8 @@ index 0000000..62d8fbc
 +    return hr;
 +}
 +
++#endif
++
 +static float actuator_level(unsigned motor, float strength) {
 +    return (motor == 0 ? 0.60f : 0.42f) * sqrtf(SDL_min(strength / 255.0f, 1.0f));
 +}
@@ -1369,7 +1631,7 @@ index 0000000..62d8fbc
 +}
 +
 +static bool is_activity(BbCombatHapticAction action) {
-+    return action == BB_HAPTIC_DOOR || action == BB_HAPTIC_LADDER_STEP;
++    return action >= BB_HAPTIC_DOOR && action < BB_HAPTIC_ACTION_COUNT;
 +}
 +
 +static BbDseCurve curve_for(const BbCombatHapticEvent *event) {
@@ -1420,7 +1682,7 @@ index 0000000..62d8fbc
 +            strength *= sweep_strength[variant];
 +            pulse.duration *= 1.0f + 0.21f * variant;
 +        }
-+        pulse.total = (UINT32)(pulse.motion.points[pulse.motion.count - 1].ms * FRAMES_PER_MS * pulse.duration);
++        pulse.total = (Uint32)(pulse.motion.points[pulse.motion.count - 1].ms * FRAMES_PER_MS * pulse.duration);
 +        pulse.gain[0] = 0.66f * tune.left * strength;
 +        pulse.gain[1] = 0.57f * tune.right * strength;
 +        return pulse;
@@ -1438,7 +1700,7 @@ index 0000000..62d8fbc
 +    return pulse;
 +}
 +
-+static void motion_sample(const DseCombatPulse *pulse, UINT32 frame, unsigned *point,
++static void motion_sample(const DseCombatPulse *pulse, Uint32 frame, unsigned *point,
 +                          float level[2], float hz[2]) {
 +    const BbDseMotionPoint *points = pulse->motion.points;
 +    const float elapsed = frame / (FRAMES_PER_MS * pulse->duration);
@@ -1456,14 +1718,14 @@ index 0000000..62d8fbc
 +    }
 +}
 +
-+static void synthesize(int16_t *samples, UINT32 frames, UINT32 active, DseEffect effect,
++static void synthesize(int16_t *samples, Uint32 frames, Uint32 active, DseEffect effect,
 +                       DseCombatPulse combat, DseActuator motors[2]) {
 +    const float level[2] = { actuator_level(0, effect.low), actuator_level(1, effect.high) };
 +    const float cycle = 6.283185307f;
 +    unsigned next_point = 1;
-+    for (UINT32 i = 0; i < frames; ++i, samples += CHANNELS) {
++    for (Uint32 i = 0; i < frames; ++i, samples += CHANNELS) {
 +        samples[0] = samples[1] = 0;
-+        const UINT32 combat_frame = combat.frame + i;
++        const Uint32 combat_frame = combat.frame + i;
 +        float combat_level[2] = {0.0f, 0.0f};
 +        float hz[2] = {45.0f, 95.0f};
 +        if (combat_frame < combat.total) {
@@ -1488,62 +1750,88 @@ index 0000000..62d8fbc
 +    }
 +}
 +
++typedef struct {
++    DseEffect effect;
++    DseCombatPulse combat;
++    Uint32 active, retained;
++    bool sound, combat_active;
++} DseRenderBlock;
++
++static DseRenderBlock render_samples(int16_t *samples, Uint32 frames, Uint32 queued,
++                                     DseActuator motors[2]) {
++    pthread_mutex_lock(&dse.effect_lock);
++    DseEffect effect = dse.effect;
++    Uint32 onset = SDL_min(effect.onset_frames, frames);
++    dse.effect.onset_frames -= onset;
++    DseCombatPulse combat = dse.combat;
++    const bool combat_active = combat.frame < combat.total;
++    if (combat_active) dse.combat.frame = SDL_min(combat.frame + frames, combat.total);
++    pthread_mutex_unlock(&dse.effect_lock);
++    Uint64 now = SDL_GetTicks();
++    Uint64 remaining = effect.end_ms > now ? (effect.end_ms - now) * FRAMES_PER_MS : 0;
++    Uint64 upcoming = remaining > queued ? remaining - queued : 0;
++    Uint32 sustained = upcoming < frames ? (Uint32)upcoming : frames;
++    Uint32 active = SDL_max(onset, sustained);
++    const bool sound = active || combat_active || motors[0].level != 0.0f || motors[1].level != 0.0f;
++    if (sound) synthesize(samples, frames, active, effect, combat, motors);
++    else memset(samples, 0, (size_t)frames * CHANNELS * sizeof(*samples));
++    return (DseRenderBlock){effect, combat, active, onset > sustained ? onset - sustained : 0, sound, combat_active};
++}
++
++static void log_block(DseRenderLog *log, const DseRenderBlock *block) {
++#ifdef _WIN32
++    const unsigned long long system_ms = GetTickCount64();
++#else
++    const unsigned long long system_ms = SDL_GetTicks();
++#endif
++    if (block->active && !log->submitted) {
++        printf("Runtime: DualSense Edge submitted game haptics PCM (frames=%u, low=%u, high=%u, system_ms=%llu)\n",
++               (unsigned)block->active, (unsigned)block->effect.low, (unsigned)block->effect.high, system_ms);
++        log->submitted = true;
++    }
++    if (block->retained && !log->short_pulse) {
++        printf("Runtime: DualSense Edge retained short game haptics pulse (frames=%u, system_ms=%llu)\n",
++               (unsigned)block->retained, system_ms);
++        log->short_pulse = true;
++    }
++    if (block->combat_active) {
++        const BbCombatHapticEvent event = block->combat.event;
++        const unsigned bit = 1u << (unsigned)event.action;
++        unsigned *messages = &log->combat_messages[event.surface];
++        if (!(*messages & bit) || (log->trace && block->combat.frame == 0)) {
++            printf("Runtime: DualSense Edge submitted combat haptics "
++                   "(action=%u, weapon=%u, boss=%u, system_ms=%llu, surface=%u, item=%lu, form=%u, mirror=%u)\n",
++                   (unsigned)event.action, (unsigned)event.weapon, (unsigned)event.boss,
++                   system_ms, (unsigned)event.surface, (unsigned long)event.weapon_id,
++                   (unsigned)event.form, (unsigned)event.mirror);
++            *messages |= bit;
++        }
++    }
++}
++
++static bool wired_edge(SDL_Gamepad *pad) {
++    return SDL_GetHintBoolean("BB_DSE_HAPTICS", true) && SDL_GetGamepadVendor(pad) == SONY &&
++           SDL_GetGamepadProduct(pad) == DUALSENSE_EDGE &&
++           SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRED;
++}
++
++#ifdef _WIN32
 +static HRESULT render(IAudioClient *client, IAudioRenderClient *output, UINT32 capacity,
 +                      DseActuator motors[2], DseRenderLog *log) {
 +    UINT32 queued;
 +    HRESULT hr = IAudioClient_GetCurrentPadding(client, &queued);
 +    if (FAILED(hr) || queued >= capacity) return hr;
-+    UINT32 frames = capacity - queued;
-+
++    const UINT32 frames = capacity - queued;
 +    BYTE *buffer;
 +    hr = IAudioRenderClient_GetBuffer(output, frames, &buffer);
 +    if (FAILED(hr)) return hr;
-+
-+    AcquireSRWLockExclusive(&dse.effect_lock);
-+    DseEffect effect = dse.effect;
-+    UINT32 onset = SDL_min(effect.onset_frames, frames);
-+    dse.effect.onset_frames -= onset;
-+    DseCombatPulse combat = dse.combat;
-+    const bool combat_active = combat.frame < combat.total;
-+    if (combat_active) dse.combat.frame = SDL_min(combat.frame + frames, combat.total);
-+    ReleaseSRWLockExclusive(&dse.effect_lock);
-+    Uint64 now = SDL_GetTicks();
-+    Uint64 remaining = effect.end_ms > now ? (effect.end_ms - now) * FRAMES_PER_MS : 0;
-+    Uint64 upcoming = remaining > queued ? remaining - queued : 0;
-+    UINT32 sustained = upcoming < frames ? (UINT32)upcoming : frames;
-+    UINT32 active = SDL_max(onset, sustained);
-+    if (!active && !combat_active && motors[0].level == 0.0f && motors[1].level == 0.0f)
-+        return IAudioRenderClient_ReleaseBuffer(output, frames, AUDCLNT_BUFFERFLAGS_SILENT);
-+
-+    synthesize((int16_t *)buffer, frames, active, effect, combat, motors);
-+    hr = IAudioRenderClient_ReleaseBuffer(output, frames, 0);
-+    if (SUCCEEDED(hr) && active && !log->submitted) {
-+        printf("Runtime: DualSense Edge submitted game haptics PCM (frames=%u, low=%u, high=%u, system_ms=%llu)\n",
-+               (unsigned)active, (unsigned)effect.low, (unsigned)effect.high,
-+               (unsigned long long)GetTickCount64());
-+        log->submitted = true;
-+    }
-+    if (SUCCEEDED(hr) && onset > sustained && !log->short_pulse) {
-+        printf("Runtime: DualSense Edge retained short game haptics pulse (frames=%u, system_ms=%llu)\n",
-+               (unsigned)(onset - sustained), (unsigned long long)GetTickCount64());
-+        log->short_pulse = true;
-+    }
-+    if (SUCCEEDED(hr) && combat_active) {
-+        const unsigned bit = 1u << (unsigned)combat.event.action;
-+        unsigned *messages = &log->combat_messages[combat.event.surface];
-+        if (!(*messages & bit) || (log->trace && combat.frame == 0)) {
-+            printf("Runtime: DualSense Edge submitted combat haptics "
-+                   "(action=%u, weapon=%u, boss=%u, system_ms=%llu, surface=%u, item=%lu, form=%u, mirror=%u)\n",
-+                   (unsigned)combat.event.action, (unsigned)combat.event.weapon, (unsigned)combat.event.boss,
-+                   (unsigned long long)GetTickCount64(), (unsigned)combat.event.surface,
-+                   (unsigned long)combat.event.weapon_id, (unsigned)combat.event.form, (unsigned)combat.event.mirror);
-+            *messages |= bit;
-+        }
-+    }
++    const DseRenderBlock block = render_samples((int16_t *)buffer, frames, queued, motors);
++    hr = IAudioRenderClient_ReleaseBuffer(output, frames, block.sound ? 0 : AUDCLNT_BUFFERFLAGS_SILENT);
++    if (SUCCEEDED(hr)) log_block(log, &block);
 +    return hr;
 +}
 +
-+static HRESULT render_session(HANDLE audio_event, LONG session) {
++static HRESULT render_session(HANDLE audio_event, int session) {
 +    /* Front channels are silent. The rear channels drive the left and right grips. */
 +    WAVEFORMATEXTENSIBLE format = {
 +        .Format = {
@@ -1584,7 +1872,7 @@ index 0000000..62d8fbc
 +    hr = IAudioClient_Start(client);
 +    if (FAILED(hr)) goto done;
 +
-+    InterlockedExchange(&dse.active_session, session);
++    SDL_SetAtomicInt(&dse.active_session, session);
 +    HANDLE events[] = { dse.stop, audio_event };
 +    while (SUCCEEDED(hr)) {
 +        DWORD state = WaitForMultipleObjects(SDL_arraysize(events), events, FALSE, 2000);
@@ -1595,7 +1883,7 @@ index 0000000..62d8fbc
 +        }
 +        hr = render(client, output, capacity, motors, &log);
 +    }
-+    InterlockedExchange(&dse.active_session, 0);
++    SDL_SetAtomicInt(&dse.active_session, 0);
 +    clear_effect();
 +    IAudioClient_Stop(client);
 +
@@ -1613,7 +1901,7 @@ index 0000000..62d8fbc
 +    HANDLE audio_event = CreateEventW(NULL, FALSE, FALSE, NULL);
 +    if (audio_event) {
 +        bool reported = false;
-+        LONG session = 0;
++        int session = 0;
 +        do {
 +            ResetEvent(audio_event);
 +            hr = render_session(audio_event, ++session);
@@ -1631,9 +1919,7 @@ index 0000000..62d8fbc
 +}
 +
 +void runtime_dse_attach(SDL_Gamepad *pad) {
-+    if (dse.thread || !SDL_GetHintBoolean("BB_DSE_HAPTICS", true) ||
-+        SDL_GetGamepadVendor(pad) != SONY || SDL_GetGamepadProduct(pad) != DUALSENSE_EDGE ||
-+        SDL_GetGamepadConnectionState(pad) != SDL_JOYSTICK_CONNECTION_WIRED) return;
++    if (dse.thread || !wired_edge(pad)) return;
 +
 +    const char *path = SDL_GetGamepadPath(pad);
 +    if (!path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
@@ -1659,8 +1945,152 @@ index 0000000..62d8fbc
 +    dse.pcm_session = 0;
 +}
 +
-+static LONG current_session(void) {
-+    LONG session = InterlockedCompareExchange(&dse.active_session, 0, 0);
++#else
++static bool sysfs_hex(const char *folder, const char *name, unsigned *value) {
++    char path[PATH_MAX];
++    const int length = snprintf(path, sizeof(path), "%s/%s", folder, name);
++    if (length < 0 || (size_t)length >= sizeof(path)) return false;
++    FILE *file = fopen(path, "r");
++    if (!file) return false;
++    const bool read = fscanf(file, "%x", value) == 1;
++    fclose(file);
++    return read;
++}
++
++static bool edge_usb_parent(const char *sysfs, char usb[PATH_MAX]) {
++    if (!realpath(sysfs, usb)) return false;
++    while (strncmp(usb, "/sys/devices/", 13) == 0) {
++        unsigned vendor, product;
++        if (sysfs_hex(usb, "idVendor", &vendor) && sysfs_hex(usb, "idProduct", &product))
++            return vendor == SONY && product == DUALSENSE_EDGE;
++        char *slash = strrchr(usb, '/');
++        if (!slash) return false;
++        *slash = '\0';
++    }
++    return false;
++}
++
++static bool gamepad_usb_parent(const char *path, char usb[PATH_MAX]) {
++    char sysfs[PATH_MAX];
++    const char *leaf = strrchr(path, '/');
++    if (!leaf) return false;
++    ++leaf;
++    if (strncmp(path, "/sys/devices/", 13) == 0) return edge_usb_parent(path, usb);
++    int length;
++    if (strncmp(leaf, "hidraw", 6) == 0)
++        length = snprintf(sysfs, sizeof(sysfs), "/sys/class/hidraw/%s/device", leaf);
++    else if (strncmp(leaf, "event", 5) == 0)
++        length = snprintf(sysfs, sizeof(sysfs), "/sys/class/input/%s/device", leaf);
++    else return false;
++    return length >= 0 && (size_t)length < sizeof(sysfs) && edge_usb_parent(sysfs, usb);
++}
++
++static int open_linux_pcm(snd_pcm_t **out) {
++    char selected[PATH_MAX], audio[PATH_MAX];
++    const bool mapped = gamepad_usb_parent(dse.hid_path, selected);
++    int card = -1, match = -1, result;
++    while ((result = snd_card_next(&card)) == 0 && card >= 0) {
++        char path[80];
++        snprintf(path, sizeof(path), "/sys/class/sound/card%d/device", card);
++        if (!edge_usb_parent(path, audio) || (mapped && strcmp(audio, selected) != 0)) continue;
++        if (match >= 0) return -ENODEV;
++        match = card;
++    }
++    if (result < 0) return result;
++    if (match < 0) return -ENODEV;
++
++    char device[32];
++    snprintf(device, sizeof(device), "hw:%d,0", match);
++    snd_pcm_t *pcm = NULL;
++    result = snd_pcm_open(&pcm, device, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
++    if (result < 0) return result;
++    result = snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
++                                CHANNELS, SAMPLE_RATE, 0, 24000);
++    if (result < 0) snd_pcm_close(pcm);
++    else *out = pcm;
++    return result;
++}
++
++static int render_linux_session(snd_pcm_t *pcm, int session) {
++    enum { BLOCK_FRAMES = SAMPLE_RATE / 100 };
++    int16_t samples[BLOCK_FRAMES * CHANNELS];
++    DseActuator motors[2] = {0};
++    DseRenderLog log = {.trace = SDL_GetHintBoolean("BB_DSE_CONTACT_TRACE", false)};
++    int error = 0;
++    SDL_SetAtomicInt(&dse.active_session, session);
++    while (!SDL_GetAtomicInt(&dse.stop)) {
++        int ready = snd_pcm_wait(pcm, 100);
++        if (ready == 0 || ready == -EINTR) continue;
++        if (ready < 0) {
++            if (ready == -EPIPE && snd_pcm_prepare(pcm) == 0) continue;
++            error = ready;
++            break;
++        }
++        const snd_pcm_sframes_t available = snd_pcm_avail_update(pcm);
++        if (available == -EPIPE && snd_pcm_prepare(pcm) == 0) continue;
++        if (available < 0) { error = (int)available; break; }
++        if (available == 0) continue;
++        snd_pcm_sframes_t queued = 0;
++        if (snd_pcm_delay(pcm, &queued) != 0 || queued < 0) queued = 0;
++        const Uint32 frames = (Uint32)SDL_min(available, BLOCK_FRAMES);
++        const DseRenderBlock block = render_samples(samples, frames, (Uint32)queued, motors);
++        Uint32 written = 0;
++        while (written < frames && !SDL_GetAtomicInt(&dse.stop)) {
++            const snd_pcm_sframes_t count = snd_pcm_writei(pcm, samples + written * CHANNELS, frames - written);
++            if (count > 0) { written += (Uint32)count; continue; }
++            if (count == -EPIPE && snd_pcm_prepare(pcm) == 0) continue;
++            if (count == 0 || count == -EAGAIN || count == -EINTR) { SDL_Delay(2); continue; }
++            error = (int)count;
++            break;
++        }
++        if (error < 0) break;
++        if (written == frames) log_block(&log, &block);
++    }
++    SDL_SetAtomicInt(&dse.active_session, 0);
++    clear_effect();
++    return error;
++}
++
++static int render_linux_thread(void *unused) {
++    (void)unused;
++    int session = 0, last_error = 0;
++    while (!SDL_GetAtomicInt(&dse.stop)) {
++        snd_pcm_t *pcm = NULL;
++        int error = open_linux_pcm(&pcm);
++        if (error == 0) {
++            last_error = 0;
++            error = render_linux_session(pcm, ++session);
++            snd_pcm_close(pcm);
++        }
++        if (error < 0 && error != last_error) {
++            fprintf(stderr, "Runtime: DualSense Edge USB ALSA endpoint unavailable (%s)\n", snd_strerror(error));
++            last_error = error;
++        }
++        for (unsigned i = 0; i < 15 && !SDL_GetAtomicInt(&dse.stop); ++i) SDL_Delay(100);
++    }
++    return 0;
++}
++
++void runtime_dse_attach(SDL_Gamepad *pad) {
++    if (dse.thread || !wired_edge(pad)) return;
++    const char *path = SDL_GetGamepadPath(pad);
++    SDL_strlcpy(dse.hid_path, path ? path : "", sizeof(dse.hid_path));
++    SDL_SetAtomicInt(&dse.stop, 0);
++    dse.thread = SDL_CreateThread(render_linux_thread, "DualSense haptics", NULL);
++}
++
++void runtime_dse_detach(void) {
++    if (!dse.thread) return;
++    runtime_dse_cancel();
++    SDL_SetAtomicInt(&dse.stop, 1);
++    SDL_WaitThread(dse.thread, NULL);
++    dse.thread = NULL;
++    dse.pcm_session = 0;
++}
++#endif
++
++static int current_session(void) {
++    const int session = SDL_GetAtomicInt(&dse.active_session);
 +    if (!session) {
 +        runtime_dse_cancel();
 +        dse.pcm_session = 0;
@@ -1668,7 +2098,7 @@ index 0000000..62d8fbc
 +    return session;
 +}
 +
-+static bool select_pcm_mode(SDL_Gamepad *pad, LONG session) {
++static bool select_pcm_mode(SDL_Gamepad *pad, int session) {
 +    if (dse.pcm_session != session) {
 +        /* Cancel any fallback rumble and release the hardware to audio haptics. SDL supplies
 +         * the USB report ID. Clear the emulated rumble flags without changing lights or triggers. */
@@ -1676,13 +2106,17 @@ index 0000000..62d8fbc
 +        SDL_RumbleGamepad(pad, 0, 0, 0);
 +        if (!SDL_SendGamepadEffect(pad, audio_mode, sizeof(audio_mode))) return false;
 +        dse.pcm_session = session;
++#ifdef _WIN32
 +        puts("Runtime: DualSense Edge HD haptics active (USB WASAPI)");
++#else
++        puts("Runtime: DualSense Edge HD haptics active (USB ALSA)");
++#endif
 +    }
 +    return true;
 +}
 +
 +bool runtime_dse_rumble(SDL_Gamepad *pad, Uint8 low, Uint8 high, Uint32 duration_ms) {
-+    LONG session = current_session();
++    const int session = current_session();
 +    if (!session) return false;
 +    if ((!low && !high) || !duration_ms)
 +        return dse.pcm_session == session && queue_rumble(session, 0, 0, 0);
@@ -1694,15 +2128,15 @@ index 0000000..62d8fbc
 +        runtime_dse_stop_charge();
 +        return true;
 +    }
-+    LONG session = current_session();
++    const int session = current_session();
 +    if (!session || event->action <= BB_HAPTIC_NONE || event->action >= BB_HAPTIC_ACTION_COUNT ||
 +        (unsigned)event->weapon >= BB_HAPTIC_WEAPON_PROFILE_COUNT ||
 +        (unsigned)event->surface >= BB_HAPTIC_SURFACE_COUNT ||
 +        (unsigned)event->form >= BB_HAPTIC_FORM_COUNT ||
 +        !select_pcm_mode(pad, session)) return false;
 +    DseCombatPulse pulse = combat_pulse(event);
-+    AcquireSRWLockExclusive(&dse.effect_lock);
-+    const bool live = InterlockedCompareExchange(&dse.active_session, 0, 0) == session;
++    pthread_mutex_lock(&dse.effect_lock);
++    const bool live = SDL_GetAtomicInt(&dse.active_session) == session;
 +    const bool playing = dse.combat.frame < dse.combat.total;
 +    const bool keep_damage = playing && is_damage(dse.combat.event.action) && !is_damage(event->action);
 +    const BbCombatHapticAction current = dse.combat.event.action;
@@ -1710,14 +2144,14 @@ index 0000000..62d8fbc
 +        (is_swing(event->action) || event->action == BB_HAPTIC_CHARGING || is_activity(event->action)) &&
 +        !is_swing(current) && current != BB_HAPTIC_CHARGING && !is_activity(current);
 +    if (live && !keep_damage && !keep_impact) dse.combat = pulse;
-+    ReleaseSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_unlock(&dse.effect_lock);
 +    return live;
 +}
 +
 +void runtime_dse_stop_charge(void) {
-+    AcquireSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_lock(&dse.effect_lock);
 +    if (dse.combat.event.action == BB_HAPTIC_CHARGING) dse.combat = (DseCombatPulse){0};
-+    ReleaseSRWLockExclusive(&dse.effect_lock);
++    pthread_mutex_unlock(&dse.effect_lock);
 +}
 +
 +#endif
@@ -1744,14 +2178,14 @@ index 0000000..983cfda
 +
 +#endif
 diff --git a/src/runtime_pad.c b/src/runtime_pad.c
-index 636e1ff..76099df 100644
+index 636e1ff..47b93f1 100644
 --- a/src/runtime_pad.c
 +++ b/src/runtime_pad.c
 @@ -16,6 +16,9 @@
  #include "gpu/bbgpu.h"
  #include "gpu/seamless/bbcoop.h"
  #include "runtime_input_config.h"
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +#include "runtime_dse_haptics.h"
 +#endif
  #include <stdio.h>
@@ -1763,7 +2197,7 @@ index 636e1ff..76099df 100644
      if (sdl_ready<0) return NULL;
 -    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
 +    if (gamepad && !SDL_GamepadConnected(gamepad)) {
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +        runtime_dse_detach();
 +#endif
 +        SDL_CloseGamepad(gamepad);
@@ -1778,7 +2212,7 @@ index 636e1ff..76099df 100644
 +            if (gamepad) {
 +                ++connected_count;
 +                printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +                runtime_dse_attach(gamepad);
 +#endif
 +            }
@@ -1789,7 +2223,7 @@ index 636e1ff..76099df 100644
          if (bbcoop_cutscene_skip()) d->buttons=BTN_OPTIONS;
          /* The team menu closed as the team's loading screen came up: the game's page under it too. */
          if (bbcoop_team_menu_back()) d->buttons|=BTN_CIRCLE;
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +        if (bb_dse_combat_input(0)) runtime_dse_stop_charge();
 +#endif
          return;
@@ -1799,7 +2233,7 @@ index 636e1ff..76099df 100644
      if (bbcoop_cutscene_skip()) d->buttons|=BTN_OPTIONS; /* headless: the screen is not drawn */
      /* The team screen over the game closed: the game's page under it too. */
      if (bbcoop_team_menu_back()) d->buttons|=BTN_CIRCLE;
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +    if (gamepad) {
 +        const int heavy = (d->buttons & (BTN_R2 | BTN_OPTIONS)) == BTN_R2;
 +        if (bb_dse_combat_input(heavy)) runtime_dse_stop_charge();
@@ -1820,7 +2254,7 @@ index 636e1ff..76099df 100644
 +    pthread_mutex_lock(&lock);
 +    int was_open=opened;
 +    opened=0;
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +    if (was_open) runtime_dse_cancel();
 +#endif
 +    pthread_mutex_unlock(&lock);
@@ -1845,7 +2279,7 @@ index 636e1ff..76099df 100644
 -    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
 +    if (g) {
 +        const uint8_t low=param[0], high=param[1];
-+#ifdef _WIN32
++#if defined(_WIN32) || defined(__linux__)
 +        static bool reported_silent, reported_nonzero, reported_fallback;
 +        const bool edge=SDL_GetGamepadVendor(g)==0x054c && SDL_GetGamepadProduct(g)==0x0df2;
 +        const bool nonzero=low || high;
