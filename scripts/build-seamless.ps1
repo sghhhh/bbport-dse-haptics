@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)] [string]$SeamlessSource,
     [string]$Clang64 = 'C:\msys64\clang64',
     [string]$DependencyPrefix,
-    [string]$Revision = 'bbsc100-p198-dse5'
+    [string]$Revision = 'bbsc100-p198-dse6'
 )
 
 $ErrorActionPreference = 'Stop'
